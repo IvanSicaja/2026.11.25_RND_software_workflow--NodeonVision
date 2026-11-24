@@ -1,0 +1,112 @@
+# =============================================================================
+# Azure DevOps pipeline - Nodeon verification
+#
+#  Stage 1  Linux    : static checks, developer tests, system tests, pytest-bdd,
+#                      Behave, Playwright (Microsoft-hosted Ubuntu agent)
+#  Stage 2  Windows  : the SAME Gherkin scenarios black-box with Reqnroll + FlaUI
+#  Stage 3  Report   : merge all results -> SRS, test spec, traceability matrix,
+#                      test report, HTML report; quality gate (--require-pass)
+#
+# Every run is tied to one commit ($(Build.SourceVersion)) - that is what makes
+# the test report usable as verification evidence (IEC 62304 5.7 / 9.x).
+# =============================================================================
+trigger:
+  branches: { include: [ main, release/* ] }
+pr:
+  branches: { include: [ main ] }
+
+variables:
+  PYTHONDONTWRITEBYTECODE: '1'
+  QT_QPA_PLATFORM: offscreen
+
+stages:
+- stage: Linux
+  jobs:
+  - job: python_suites
+    pool: { vmImage: ubuntu-24.04 }
+    steps:
+    - checkout: self
+    - task: UsePythonVersion@0
+      inputs: { versionSpec: '3.12' }
+    - script: |
+        sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+          libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 libfontconfig1
+        python -m pip install -r tests/test_automation/requirements-test.txt
+        python -m playwright install --with-deps chromium
+      displayName: Install test environment (pinned versions)
+    - script: bash tests/test_automation/tools/run_all.sh
+      displayName: Run all Linux suites + quality gate
+    - task: PublishTestResults@2
+      condition: always()
+      inputs:
+        testResultsFormat: JUnit
+        testResultsFiles: 'tests/test_automation/reports/**/*.xml'
+        testRunTitle: 'Nodeon Linux suites'
+    - publish: tests/test_automation/reports
+      artifact: reports-linux
+      condition: always()
+
+- stage: Windows
+  dependsOn: []                  # runs in parallel with Linux
+  jobs:
+  - job: reqnroll_flaui
+    # UI Automation needs an interactive, unlocked desktop. Use a self-hosted agent
+    # configured "run as interactive process with auto-logon" (pool name: example).
+    # Microsoft-hosted 'windows-latest' can work for simple UI tests but is less stable.
+    pool: { name: Nodeon-UI-Windows }
+    steps:
+    - checkout: self
+    - task: UsePythonVersion@0
+      inputs: { versionSpec: '3.12' }
+    - task: UseDotNet@2
+      inputs: { packageType: sdk, version: '8.0.x' }
+    - script: python -m pip install -r ../../draft_requirements_python-3.11.9.txt
+      workingDirectory: tests/test_automation
+      displayName: Install Nodeon runtime (PySide6)
+    - script: >
+        dotnet test dotnet/Nodeon.SystemTests --filter "Category!=python_only"
+        --logger "trx;LogFileName=reqnroll.trx" --results-directory reports/reqnroll
+      workingDirectory: tests/test_automation
+      displayName: Reqnroll + FlaUI (black-box UI Automation)
+    - task: PublishTestResults@2
+      condition: always()
+      inputs:
+        testResultsFormat: VSTest
+        testResultsFiles: 'tests/test_automation/reports/reqnroll/*.trx'
+        testRunTitle: 'Nodeon Windows (Reqnroll + FlaUI)'
+    - publish: tests/test_automation/reports/reqnroll
+      artifact: reports-windows
+      condition: always()
+
+- stage: Report
+  dependsOn: [ Linux, Windows ]
+  condition: always()
+  jobs:
+  - job: traceability
+    pool: { vmImage: ubuntu-24.04 }
+    steps:
+    - checkout: self
+    - task: UsePythonVersion@0
+      inputs: { versionSpec: '3.12' }
+    - download: current
+      artifact: reports-linux
+    - download: current
+      artifact: reports-windows
+    - script: |
+        sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0
+        python -m pip install -r tests/test_automation/requirements-test.txt
+        python -m playwright install --with-deps chromium
+        mkdir -p tests/test_automation/reports/reqnroll
+        cp -r "$(Pipeline.Workspace)/reports-linux/." tests/test_automation/reports/
+        cp -r "$(Pipeline.Workspace)/reports-windows/." tests/test_automation/reports/reqnroll/
+        cd test_automation
+        python tools/generate_docs.py > reports/generate_1.json
+        python -m pytest python/web_tests -q --junitxml=reports/junit-playwright.xml
+        python tools/generate_docs.py --require-pass
+      displayName: Merge results, documents, quality gate
+    - publish: tests/test_automation/docs
+      artifact: verification-documents
+      condition: always()
+    - publish: tests/test_automation/reports
+      artifact: reports-all
+      condition: always()

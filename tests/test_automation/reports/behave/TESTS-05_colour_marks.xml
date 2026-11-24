@@ -1,0 +1,67 @@
+<testsuite name="05_colour_marks.Colour marks" tests="5" errors="0" failures="0" skipped="0" time="0.645857" timestamp="2026-11-24T11:01:22.370511" hostname="vm"><testcase classname="05_colour_marks.Colour marks" name="TC-MARK-001 Colour the whole name of a branch" status="passed" time="0.099337"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-MARK-001 Colour the whole name of a branch
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.085s
+    When I put the cursor on "src/" ... passed in 0.006s
+    And I press "Alt+G" ... passed in 0.008s
+    Then the name "src/" is marked "Accepted" ... passed in 0.000s
+    And the name "main.py" is marked "Not checked yet (only mentioned)" ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="05_colour_marks.Colour marks" name="TC-MARK-002 Colour only the word at the cursor" status="passed" time="0.085414"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-MARK-002 Colour only the word at the cursor
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.070s
+    When I put the cursor on "README.md" ... passed in 0.006s
+    And I press "Alt+Shift+R" ... passed in 0.009s
+    Then the word "README.md" is marked "Rejected" ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="05_colour_marks.Colour marks" name="TC-MARK-003 The same key again removes the colour" status="passed" time="0.132778"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-MARK-003 The same key again removes the colour
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.110s
+    When I put the cursor on "README.md" ... passed in 0.006s
+    And I press "Alt+O" ... passed in 0.008s
+    Then the name "README.md" is marked "To be approved" ... passed in 0.000s
+    When I press "Alt+O" ... passed in 0.007s
+    Then the name "README.md" is marked "Not checked yet (only mentioned)" ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="05_colour_marks.Colour marks" name="TC-MARK-006 Colours are stored and come back after reopening" status="passed" time="0.240878"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-MARK-006 Colours are stored and come back after reopening
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.113s
+    When I put the cursor on "docs/" ... passed in 0.006s
+    And I press "Alt+R" ... passed in 0.008s
+    And I reopen the tree ... passed in 0.114s
+    Then the name "docs/" is marked "Rejected" ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="05_colour_marks.Colour marks" name="TC-MARK-004 Explanations are never coloured" status="passed" time="0.087451"><system-out>
+<![CDATA[
+@scenario.begin
+
+  @python_only
+  Scenario: TC-MARK-004 Explanations are never coloured
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.075s
+    When I select "Source code" ... passed in 0.006s
+    And I press "Alt+Shift+G" ... passed in 0.006s
+    Then the explanation "Source code" has the explanation colour ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase></testsuite>

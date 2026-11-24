@@ -1,0 +1,800 @@
+# =============================================================================
+# Nodeon - Software Requirements Specification (SRS) - source data
+# -----------------------------------------------------------------------------
+# Single source of truth. The readable documents (SRS, test specification,
+# traceability matrix, manual protocol) are GENERATED from this file and from
+# test_cases.yaml by  tests/test_automation/tools/generate_docs.py.
+#
+# Fields
+#   id          unique, never re-used (REQ-<AREA>-<NNN>)
+#   title       short name
+#   text        the requirement: "The software shall ..." (one testable statement)
+#   acceptance  how we decide it is met (observable result)
+#   priority    High  = core function / data integrity
+#               Medium = important convenience
+#               Low   = cosmetic
+#   source      where the requirement came from (user request in the project history)
+# =============================================================================
+
+meta:
+  product: Nodeon
+  version: "1.1.0"
+  document: SRS-NODEON-001
+  revision: B
+  intended_use: >
+    Nodeon is a desktop editor for plain-text structure trees (for example a
+    project folder structure or a topic map). It lets the user build, fold,
+    restructure, explain and colour-mark tree branches while the file stays a
+    pure UTF-8 .txt file.
+
+areas:
+  GEN: General, start-up and installation
+  FMT: Tree text format
+  FILE: Files - open, save, recent files
+  FOLD: Folding (collapse / expand)
+  EDIT: Structural editing
+  KEY: Keyboard behaviour while typing
+  EXPL: Explanations and their alignment
+  PASTE: Pasting text from other programs
+  COL: Column (block) selection
+  FIND: Find
+  UI: Window, toolbar, themes, help
+  MARK: Colour marks
+  LEG: Colour legend
+  SAFE: Robustness and data safety
+  ITEM: Item details - pictures, must-have features, features to avoid
+  TOOL: Validation of the test-report tool (QMS software, not part of the product)
+
+requirements:
+
+# ----------------------------------------------------------------------------- GEN
+- id: REQ-GEN-001
+  title: Application name and entry point
+  text: The application shall be called "Nodeon" and shall be started with main/main.py.
+  acceptance: "python main/main.py starts a window titled '<file> — Nodeon' (with * while changed)."
+  priority: High
+  source: Rename requests (Nodeon.py, later main.py)
+- id: REQ-GEN-002
+  title: Model file next to the entry point
+  text: The application shall always load treemodel.py from the folder of main.py, independent of the current working directory.
+  acceptance: Starting from the project root and from main/ both work; another 'treemodel' elsewhere is never used.
+  priority: High
+  source: Error report 'module treemodel has no attribute FormatOptions'
+- id: REQ-GEN-003
+  title: Clear message for a missing or wrong model file
+  text: If treemodel.py is missing, empty, not Nodeon's file, a copy of main.py or contains a syntax error, the application shall show a clear message naming the file path and stop without a crash.
+  acceptance: Each of the 5 cases shows its specific message; exit code 1.
+  priority: High
+  source: Error report 'module treemodel has no attribute FormatOptions'
+- id: REQ-GEN-004
+  title: Settings kept after renaming
+  text: Preferences saved under the earlier name "Tree Editor" shall be taken over the first time Nodeon starts.
+  acceptance: Recent files, window size, zoom and theme from TreeEditor settings appear in Nodeon.
+  priority: Low
+  source: Rename to Nodeon
+- id: REQ-GEN-005
+  title: First start window size
+  text: On the first start the window shall use the full available screen height and 50 % of the screen width, centred.
+  acceptance: Window frame height = available height; width = half the available width.
+  priority: Low
+  source: GUI improvements request
+- id: REQ-GEN-006
+  title: Start with a file
+  text: A tree file passed on the command line shall be opened at start; without a file a new tree is shown.
+  acceptance: "'python main/main.py data/example_project_tree.txt' opens that file; without argument the text 'new-project/' is shown."
+  priority: Medium
+  source: Initial request
+
+# ----------------------------------------------------------------------------- FMT
+- id: REQ-FMT-001
+  title: Pure UTF-8 text file
+  text: Trees shall be stored as pure UTF-8 .txt files with no extra markup inside the file.
+  acceptance: A saved file contains only the tree text, newline-terminated; colours are never written into it.
+  priority: High
+  source: Initial request
+- id: REQ-FMT-002
+  title: Box-drawing structure
+  text: Branches shall be drawn with the characters │, ├── and └── using exactly 4 columns per level.
+  acceptance: Every child line starts with (level-1) * 4 guide columns followed by '├── ' or '└── '.
+  priority: High
+  source: Initial request (structure example)
+- id: REQ-FMT-003
+  title: Last child uses └──
+  text: The last child of a branch shall use └── and its sub-tree shall not continue the vertical line; other children use ├── and │.
+  acceptance: Canonical rendering of the example tree reproduces the user's structure exactly.
+  priority: High
+  source: Initial request
+- id: REQ-FMT-004
+  title: Explanation marker
+  text: An explanation shall start with the arrow ➡️ (U+27A1 U+FE0F); the arrow without the invisible emoji selector (U+27A1) shall be accepted too.
+  acceptance: Text after ➡️ is an explanation; saving writes ➡️.
+  priority: High
+  source: Request to replace '#' with ➡️
+- id: REQ-FMT-005
+  title: '"#" is ordinary text'
+  text: The character # shall be treated like every other character and shall never start an explanation.
+  acceptance: "'src/   # note' is a name; it is saved unchanged and never shown in the explanation colour."
+  priority: High
+  source: Request '# must be handled like all other characters'
+- id: REQ-FMT-006
+  title: Multi-line explanations
+  text: An explanation may continue on following lines that contain only guides and ➡️; these lines belong to the branch above.
+  acceptance: All explanation lines of a branch are read, moved and saved together.
+  priority: High
+  source: Initial request (example tree)
+- id: REQ-FMT-007
+  title: Empty spacer lines
+  text: Lines that contain only │ characters (or nothing) shall be kept as empty spacer lines at their place.
+  acceptance: Spacer lines survive opening, editing elsewhere and saving.
+  priority: High
+  source: Initial request (example tree)
+- id: REQ-FMT-008
+  title: Tolerant reading
+  text: Trees written with ASCII connectors (|--, `--, +--), tabs, non-breaking spaces or plain indentation shall be read correctly.
+  acceptance: Such a file is understood as the same tree and Format writes the canonical form.
+  priority: Medium
+  source: Initial request (manual trees from other tools)
+- id: REQ-FMT-009
+  title: Canonical formatting (Format document)
+  text: Format document (Ctrl+Alt+L) shall redraw all tree lines and align the explanations of consecutive siblings in one column, at least column 35 (index 34) and at least 3 spaces after the longest name.
+  acceptance: Formatting the formatted text again changes nothing (idempotent).
+  priority: High
+  source: Initial request, explanation alignment request
+- id: REQ-FMT-010
+  title: Text above the tree
+  text: Lines that start with ➡️ before the first branch shall be kept as they are.
+  acceptance: A preamble line survives saving.
+  priority: Low
+  source: Format robustness
+
+# ----------------------------------------------------------------------------- FILE
+- id: REQ-FILE-001
+  title: Open a tree
+  text: The user shall be able to open a .txt tree (Ctrl+O, File > Open, Open recent, drag & drop of a file onto the window).
+  acceptance: The file content is shown; the title shows the file name.
+  priority: High
+  source: Initial request
+- id: REQ-FILE-002
+  title: Save atomically
+  text: Saving (Ctrl+S, Save As Ctrl+Shift+S) shall write the file atomically so that an interrupted save never leaves a half-written file.
+  acceptance: Save uses a temporary file + rename (QSaveFile); the old file stays intact on failure.
+  priority: High
+  source: Production-level request
+- id: REQ-FILE-003
+  title: Keep line endings and encoding
+  text: Saving shall keep the line endings of the opened file (LF or CRLF), write UTF-8 and end the file with a line break; a UTF-8 BOM is accepted when reading.
+  acceptance: A CRLF file is saved with CRLF; a BOM file opens without a stray character.
+  priority: High
+  source: Production-level request
+- id: REQ-FILE-004
+  title: Invalid files
+  text: A binary file shall be refused with a message; a file that is not valid UTF-8 shall open with replacement characters and a warning.
+  acceptance: Messages 'This does not look like a text file' / 'not valid UTF-8' appear.
+  priority: Medium
+  source: Production-level request
+- id: REQ-FILE-005
+  title: Unsaved changes
+  text: Before New, Open, opening a recent file, dropping a file or closing, the user shall be asked to Save, Discard or Cancel when there are unsaved changes.
+  acceptance: Cancel keeps the current tree; the title shows * while modified.
+  priority: High
+  source: Production-level request
+- id: REQ-FILE-006
+  title: Recent files
+  text: The last 10 opened or saved files shall be listed under File > Open recent; files that no longer exist are removed when they cannot be opened.
+  acceptance: List order is most recent first, max. 10 entries.
+  priority: Low
+  source: Initial delivery
+- id: REQ-FILE-007
+  title: Format on save keeps explanation columns
+  text: When saving, the tree lines shall be tidied but the explanation columns chosen by the user shall be kept (option in Settings, on by default).
+  acceptance: Manually aligned explanations are unchanged after Save; Ctrl+Alt+L still aligns automatically.
+  priority: High
+  source: Explanation alignment request
+
+# ----------------------------------------------------------------------------- FOLD
+- id: REQ-FOLD-001
+  title: Fold arrow per branch
+  text: Every branch with sub-items shall have a ▼ (open) / ▶ (folded) arrow in the margin next to its line number; a click toggles it.
+  acceptance: Clicking the arrow hides/shows the sub-items.
+  priority: High
+  source: Initial request (PyCharm-like folding)
+- id: REQ-FOLD-002
+  title: Fold a branch completely
+  text: Alt+click on an arrow, Ctrl+Shift+. and Ctrl+Shift+, shall collapse / expand the branch with everything inside it.
+  acceptance: All nested branches of that branch change state.
+  priority: Medium
+  source: Initial request
+- id: REQ-FOLD-003
+  title: Collapse all / expand all
+  text: Alt+1 (Collapse all) shall fold every branch; Alt+4 (Expand all) shall open every branch.
+  acceptance: After Alt+1 only the top-level lines are visible; after Alt+4 every line is visible.
+  priority: High
+  source: Initial request
+- id: REQ-FOLD-004
+  title: One level for the whole document
+  text: Alt+2 (Collapse level) and Alt+3 (Expand level) shall bring every branch of the document to the same number of visible levels, one less / one more than now.
+  acceptance: A mixed fold state becomes a uniform level; the level indicator changes by one.
+  priority: High
+  source: Initial request ('standardize overview')
+- id: REQ-FOLD-005
+  title: Show exactly N levels
+  text: Ctrl+1 ... Ctrl+9 and the 'Levels' box shall show exactly N levels; the box shows 'Levels - current / maximum'.
+  acceptance: Ctrl+2 on a 3-level tree shows 2 levels and the box shows 2 / 3.
+  priority: Medium
+  source: Initial request
+- id: REQ-FOLD-006
+  title: Toggle branch at cursor
+  text: Ctrl+. shall fold / unfold the branch at the cursor (or the nearest parent branch).
+  acceptance: The branch of the cursor line changes state.
+  priority: Medium
+  source: Initial request
+- id: REQ-FOLD-007
+  title: Folded badge
+  text: A folded branch shall show a clickable '⋯ N items' badge after its line; a click opens the branch.
+  acceptance: The number equals the hidden sub-items.
+  priority: Low
+  source: Initial delivery
+- id: REQ-FOLD-008
+  title: Folds survive editing
+  text: Typing, structural edits, alignment of explanations and colour marking shall not change which branches are folded (except to reveal the edited branch).
+  acceptance: The number of hidden lines is unchanged after such an action.
+  priority: High
+  source: Initial delivery
+- id: REQ-FOLD-009
+  title: Cursor never inside folded lines
+  text: The cursor shall skip folded lines; Backspace / Delete at the border of a folded branch expands it first.
+  acceptance: Arrow down from a folded branch goes to the next visible line.
+  priority: Medium
+  source: Initial delivery
+
+# ----------------------------------------------------------------------------- EDIT
+- id: REQ-EDIT-001
+  title: Add item
+  text: Ctrl+Enter (toolbar 'Add item') shall add a new empty item on the same level below the current branch and put the cursor on it.
+  acceptance: A new line '├── ' / '└── ' appears below the branch (after its sub-items).
+  priority: High
+  source: Initial request
+- id: REQ-EDIT-002
+  title: Add sub-item
+  text: Ctrl+Shift+Enter (toolbar 'Add sub-item') shall add a new empty item inside the current branch.
+  acceptance: The new item is one level deeper.
+  priority: High
+  source: Initial request
+- id: REQ-EDIT-003
+  title: Move up / down
+  text: Alt+Shift+Up / Alt+Shift+Down shall move the branch with all its sub-items one position up / down among its siblings.
+  acceptance: Sub-items move along; the first / last item cannot move further (message).
+  priority: High
+  source: Initial request
+- id: REQ-EDIT-004
+  title: Move left / right
+  text: Alt+Shift+Left / Alt+Shift+Right (and Shift+Tab / Tab on a branch line) shall move the branch one level up (outdent) / into the item above (indent).
+  acceptance: The tree lines are redrawn correctly.
+  priority: High
+  source: Initial request
+- id: REQ-EDIT-005
+  title: Duplicate branch
+  text: Ctrl+D shall duplicate the branch with all its sub-items directly below it.
+  acceptance: An identical copy appears below.
+  priority: Medium
+  source: Initial delivery
+- id: REQ-EDIT-006
+  title: Delete branch
+  text: Ctrl+Shift+Delete (toolbar 'Delete branch', last button of the second row) shall delete the branch with everything inside it.
+  acceptance: The branch and its sub-items are gone; the status bar names the number of sub-items.
+  priority: High
+  source: Initial request; button renamed and moved to the end
+- id: REQ-EDIT-007
+  title: Delete line (Ctrl+Q)
+  text: Ctrl+Q (toolbar 'Delete line') shall delete only the line at the cursor; on a branch line its sub-items stay and move up one level; on a 2nd/3rd explanation line or empty line only that line is deleted.
+  acceptance: The file is exactly one line shorter; sub-items are kept.
+  priority: High
+  source: Delete-line request
+- id: REQ-EDIT-008
+  title: Ctrl+Q does not quit
+  text: Ctrl+Q shall not close the application; File > Exit has no shortcut (Alt+F4 still closes the window).
+  acceptance: After Ctrl+Q the window is still open.
+  priority: High
+  source: Delete-line request
+- id: REQ-EDIT-009
+  title: Insert empty line
+  text: Alt+Enter (toolbar 'Empty line') shall insert an empty spacer line below the cursor line that keeps the vertical branch lines on its left; pressing it again adds another one.
+  acceptance: e.g. between two children of a branch the line '│   │' is inserted.
+  priority: Medium
+  source: Empty-line request
+- id: REQ-EDIT-010
+  title: Edit name & explanation dialog
+  text: Ctrl+Shift+E (toolbar 'Explanation') shall open a dialog to edit the name and the explanation of the branch; Ctrl+E opens it with the explanation focused; F2 has no function.
+  acceptance: Saving the dialog (OK or Ctrl+Enter) updates the line; each explanation line becomes one ➡️ line.
+  priority: High
+  source: Shortcut request (F2 replaced), label request ('Explanation')
+- id: REQ-EDIT-011
+  title: Name validation in the dialog
+  text: A name that starts with ➡️ or contains ' ➡️' shall be refused in the dialog with an explanation.
+  acceptance: Message 'Invalid name'.
+  priority: Medium
+  source: Explanation marker request
+- id: REQ-EDIT-012
+  title: One undo step per command
+  text: Every structural command shall be undone / redone in one step with Ctrl+Z / Ctrl+Y (also Ctrl+Shift+Z).
+  acceptance: One Ctrl+Z restores the text before the command.
+  priority: High
+  source: Initial delivery
+
+# ----------------------------------------------------------------------------- KEY
+- id: REQ-KEY-001
+  title: Enter at the end of a name
+  text: Enter at the end of a name shall create the next item on the same level (or the first sub-item when the branch is open with sub-items or is the top-level item).
+  acceptance: A new line with the correct connector appears and the cursor is on it.
+  priority: High
+  source: Initial request
+- id: REQ-KEY-002
+  title: Enter inside or before a name
+  text: Enter in the middle of a name shall split it into two items; Enter at the start of a name shall insert an item above.
+  acceptance: "'gui|de.md' becomes 'gui' and 'de.md'."
+  priority: Medium
+  source: Initial delivery
+- id: REQ-KEY-003
+  title: Finishing a list
+  text: Enter on an empty item shall move it one level left; Backspace on an empty new item shall remove it.
+  acceptance: The empty item moves left / disappears.
+  priority: Medium
+  source: Initial delivery
+- id: REQ-KEY-004
+  title: Tab outside branch lines and raw newline
+  text: Tab on a non-branch line shall insert 4 spaces; Shift+Enter shall insert a plain line break without creating an item.
+  acceptance: 4 spaces / a plain new line are inserted.
+  priority: Low
+  source: Initial delivery
+- id: REQ-KEY-005
+  title: Own shortcuts win over editor keys
+  text: The application's shortcuts shall take priority over the text editor's built-in key handling.
+  acceptance: e.g. Alt+Shift+Up moves the branch instead of being swallowed by the editor.
+  priority: High
+  source: Initial delivery
+
+# ----------------------------------------------------------------------------- EXPL
+- id: REQ-EXPL-001
+  title: Move explanations left / right
+  text: Alt+Left / Alt+Right (toolbar 'Explanations ←/→') shall move the explanations of the selected lines, or of the whole document when nothing is selected, one column left / right.
+  acceptance: The ➡️ columns change by one; the selection stays.
+  priority: High
+  source: Explanation alignment request
+- id: REQ-EXPL-002
+  title: Minimum 3 spaces
+  text: An explanation shall always keep at least 3 spaces after the text of its line.
+  acceptance: Moving left stops 3 spaces after the longest text of that line.
+  priority: High
+  source: Explanation alignment request
+- id: REQ-EXPL-003
+  title: Moving left keeps the others aligned
+  text: When moving left, explanations that reach their text stop; all others stay aligned in one column and keep moving.
+  acceptance: Unblocked explanations share one column.
+  priority: High
+  source: Explanation alignment request
+- id: REQ-EXPL-004
+  title: Moving right aligns everything
+  text: When moving right, the leftmost explanations move first until all are in one vertical column; then all move together.
+  acceptance: After enough presses every ➡️ is in the same column.
+  priority: High
+  source: Explanation alignment request
+- id: REQ-EXPL-005
+  title: Multi-line explanation moves as a block
+  text: All lines of one explanation shall move together and stay aligned.
+  acceptance: Same ➡️ column for all lines of one branch.
+  priority: Medium
+  source: Explanation alignment request
+- id: REQ-EXPL-006
+  title: Columns kept by other actions
+  text: Manually chosen explanation columns shall be kept when saving and when adding, moving or editing branches; a new explanation joins the column of its siblings.
+  acceptance: Columns unchanged after Save and Alt+Shift+Up.
+  priority: High
+  source: Explanation alignment request
+
+# ----------------------------------------------------------------------------- PASTE
+- id: REQ-PASTE-001
+  title: Multi-line paste creates siblings
+  text: Pasting text with several lines (from PDF, Word, web) shall put the first line where the cursor is and create one new branch per further line on the SAME level directly below; the tree below stays intact.
+  acceptance: 3 pasted lines into an empty item give 3 sibling items.
+  priority: High
+  source: Paste request
+- id: REQ-PASTE-002
+  title: Clean-up of pasted text
+  text: Empty lines, Windows / Word / PDF line breaks, tabs and non-breaking spaces in pasted text shall be cleaned up; a single line with a trailing line break is pasted as one line.
+  acceptance: No empty items are created.
+  priority: Medium
+  source: Paste request
+- id: REQ-PASTE-003
+  title: Paste inside explanations and on empty lines
+  text: Pasting several lines inside an explanation shall add further explanation lines; pasting on an empty spacer line shall create new branches there.
+  acceptance: Explanation lines are aligned under each other.
+  priority: Medium
+  source: Paste request
+- id: REQ-PASTE-004
+  title: Paste replaces a selection and undoes in one step
+  text: A paste shall replace a selection on one line, keep a leading space before the first word and be undone with one Ctrl+Z.
+  acceptance: One Ctrl+Z restores the text before the paste.
+  priority: Medium
+  source: Paste request
+- id: REQ-PASTE-005
+  title: Copied tree pasted as it is
+  text: Text that already contains ├── / └── shall be pasted unchanged; a normal single-line paste is unchanged.
+  acceptance: The pasted tree text appears exactly.
+  priority: Medium
+  source: Paste request
+
+# ----------------------------------------------------------------------------- COL
+- id: REQ-COL-001
+  title: Column selection mode
+  text: Alt+Shift+Insert and the toolbar button 'Column select' shall switch column (block) selection on / off; while on, the button is pressed and the status bar shows a COLUMN badge.
+  acceptance: Button checked and badge visible only while the mode is on.
+  priority: Medium
+  source: PyCharm-like column selection request
+- id: REQ-COL-002
+  title: Select a rectangle
+  text: In column mode Shift+arrows, Shift+Home/End and mouse dragging shall select a rectangle over several lines; a normal selection becomes the rectangle when the mode is switched on.
+  acceptance: The rectangle covers the same columns on every selected line.
+  priority: Medium
+  source: Column selection request
+- id: REQ-COL-003
+  title: Edit all rows at once
+  text: Typing, Backspace, Delete, Tab and Shift+Tab shall act on every row of the rectangle at once; the column may lie beyond the end of short lines (spaces are added).
+  acceptance: The same text appears on all rows; each keystroke is one undo step.
+  priority: Medium
+  source: Column selection request
+- id: REQ-COL-004
+  title: Copy, cut, paste a column
+  text: Ctrl+C / Ctrl+X shall copy / cut the rectangle row by row; Ctrl+V pastes a copied column row by row or one line into every row.
+  acceptance: Copy + cut + paste restores the original text.
+  priority: Medium
+  source: Column selection request
+- id: REQ-COL-005
+  title: Leaving the rectangle
+  text: Esc, any other edit, Up / Down / Enter shall end the rectangle; the mode itself stays on until switched off; folded lines are skipped; AltGr characters can be typed.
+  acceptance: After Esc there is no rectangle, the mode is still on.
+  priority: Low
+  source: Column selection request
+
+# ----------------------------------------------------------------------------- FIND
+- id: REQ-FIND-001
+  title: Find bar
+  text: Ctrl+F shall open a find bar; Enter / F3 finds the next, Shift+F3 the previous occurrence, with optional 'Match case', wrapping around at the end and 'Not found' when nothing matches; Esc closes it.
+  acceptance: The found text is selected and centred.
+  priority: Medium
+  source: Initial delivery
+- id: REQ-FIND-002
+  title: Find opens folded branches
+  text: A match inside a folded branch shall open that branch.
+  acceptance: The found line is visible.
+  priority: Medium
+  source: Initial delivery
+
+# ----------------------------------------------------------------------------- UI
+- id: REQ-UI-001
+  title: Toolbar with visible shortcuts
+  text: Every toolbar button shall show an icon, its name and its keyboard shortcut underneath; hovering shows a tooltip with the description.
+  acceptance: e.g. 'Collapse all' shows 'Alt+1'.
+  priority: Medium
+  source: GUI improvements request
+- id: REQ-UI-002
+  title: Toolbar content and order
+  text: "Row 1: Open, Save, Collapse all, Collapse level, Expand level, Expand all, Levels, Explanations ←, Explanations →, Column select, Mark line, Mark words. Row 2: Add item, Add sub-item, Empty line, Explanation, Move up, Move down, Move left, Move right, Format, Delete line, Delete branch."
+  acceptance: Buttons appear in this order; overflow goes behind » on narrow windows.
+  priority: Low
+  source: GUI requests (labels, order, Delete at the end)
+- id: REQ-UI-003
+  title: Light and dark theme
+  text: The user shall switch between a light and a dark theme (View > Dark theme); the first start follows the system; the choice is remembered; switching keeps the fold arrows.
+  acceptance: All colours change; folds stay.
+  priority: Low
+  source: Initial delivery
+- id: REQ-UI-004
+  title: Font size and zoom
+  text: The editor font shall be 12 pt by default; Ctrl+=, Ctrl+-, Ctrl+mouse wheel and Ctrl+0 (reset) shall zoom between 6 and 48 pt; the size is remembered.
+  acceptance: Ctrl+0 returns to 12 pt.
+  priority: Low
+  source: GUI improvements request
+- id: REQ-UI-005
+  title: Syntax colours
+  text: Tree lines shall be shown in a muted colour, folder names (ending with /) in bold blue, file names in the default text colour and explanations in their own explanation colour (violet by default).
+  acceptance: Colours match the theme / legend.
+  priority: Medium
+  source: Initial delivery; comment colour request
+- id: REQ-UI-006
+  title: Status bar
+  text: The status bar shall show the path of the current branch (breadcrumb), the cursor position 'Ln x, Col y' and short messages after commands.
+  acceptance: e.g. 'project-name/ › assets/' and 'Ln 4, Col 1'.
+  priority: Low
+  source: Initial delivery
+- id: REQ-UI-007
+  title: Help
+  text: F1 shall list all keyboard shortcuts, including the current colour shortcuts from the legend; Help > About shows name and version.
+  acceptance: Changed colour shortcuts appear in the F1 list.
+  priority: Low
+  source: Initial delivery; legend shortcut request
+- id: REQ-UI-008
+  title: Settings
+  text: View > Settings shall set the minimum explanation column, the spaces before the explanation and whether saving tidies the tree lines.
+  acceptance: Changes are applied and remembered.
+  priority: Low
+  source: Initial delivery
+
+# ----------------------------------------------------------------------------- MARK
+- id: REQ-MARK-001
+  title: Colour the whole name
+  text: The whole-name commands (default Alt+G / Alt+O / Alt+R) shall colour the name of the branch at the cursor, or of every branch in the selection, in the colour of that legend entry.
+  acceptance: The name takes the colour; the text of the file does not change.
+  priority: High
+  source: Colour marks request
+- id: REQ-MARK-002
+  title: Colour a word or a selection
+  text: The word commands (default Alt+Shift+G / O / R) shall colour only the selected characters, or - without a selection - the word at the cursor (letters, digits and joined symbols like 01_media/, README.md, non-code; brackets, commas and a final period are not part of the word).
+  acceptance: Only that word / those characters change colour.
+  priority: High
+  source: Word colouring requests
+- id: REQ-MARK-003
+  title: Same key again removes
+  text: Pressing the same colour command again on the same name / text shall remove the colour.
+  acceptance: The default colour is shown again.
+  priority: Medium
+  source: Colour marks request
+- id: REQ-MARK-004
+  title: Default colour command
+  text: Alt+C (whole name) and Alt+Shift+C (word / selection) shall give the default text colour back; inside a name that has a whole-name colour, a word can be set to the default colour on its own.
+  acceptance: The word shows the default colour, the rest of the name keeps the line colour.
+  priority: High
+  source: Default colour request
+- id: REQ-MARK-005
+  title: Only names are coloured
+  text: Colour commands shall never colour explanations, tree lines, spaces or the ➡️ marker; # inside a name is coloured like any other character.
+  acceptance: Explanations always show the explanation colour.
+  priority: High
+  source: "'Explanation colour must never change' request"
+- id: REQ-MARK-006
+  title: Nothing to colour
+  text: With the cursor on a space, a tree line, an empty line or an explanation, a word command shall colour nothing and show a message.
+  acceptance: "Status: 'No word at the cursor ...'."
+  priority: Medium
+  source: Word colouring request
+- id: REQ-MARK-007
+  title: Colours follow the text
+  text: Colours shall stay on their branch / word when branches are moved, explanations are moved, other text in the line is typed, branches are folded, and after Undo; if the coloured word itself is changed its colour disappears (Undo brings it back).
+  acceptance: Colours stay correct after each of these actions.
+  priority: High
+  source: Colour marks requests
+- id: REQ-MARK-008
+  title: Colours stored next to the file
+  text: Colours shall be saved immediately in '<file>.txt.marks.json' next to the tree; the .txt is never changed by colouring; the marks file is removed when nothing is coloured and the legend equals the default.
+  acceptance: Reopening the tree shows the same colours.
+  priority: High
+  source: Colour marks request
+- id: REQ-MARK-009
+  title: Broken or old marks files
+  text: A damaged marks file shall be ignored with a warning (the tree still opens); colours of explanations or unknown colours in older files shall be ignored.
+  acceptance: "Status: 'Colour marks could not be read ...'."
+  priority: Medium
+  source: Production-level request
+- id: REQ-MARK-010
+  title: Toolbar buttons Mark line / Mark words
+  text: Two toolbar buttons with different icons shall open the whole-name commands ('Mark line') and the word commands ('Mark words'); their captions show the current shortcuts compactly (e.g. 'Alt+G/O/R/C').
+  acceptance: Each menu lists the colours and 'Default colour' with their shortcuts.
+  priority: Medium
+  source: Two-icons request
+
+# ----------------------------------------------------------------------------- LEG
+- id: REQ-LEG-001
+  title: Always-visible legend
+  text: A legend below the editor shall always show every colour with its meaning; it can be hidden / shown with View > Show colour legend (remembered).
+  acceptance: The legend is visible after start.
+  priority: High
+  source: Legend request
+- id: REQ-LEG-002
+  title: Standard meanings
+  text: "The standard legend shall be: default text = 'Not checked yet (only mentioned)', green = 'Accepted', orange = 'To be approved', red = 'Rejected', violet = 'Explanation'."
+  acceptance: The five entries appear in this order.
+  priority: High
+  source: Legend request
+- id: REQ-LEG-003
+  title: Own colours
+  text: The user shall add own colours with a meaning (e.g. 'Same on both robots'); they appear in the legend, the Mark line / Mark words menus, the Tree menu and the context menu; up to 200 own colours.
+  acceptance: The new colour can be applied to names and words.
+  priority: High
+  source: Custom colour request
+- id: REQ-LEG-004
+  title: Edit every colour
+  text: For every legend entry (default text, the built-in colours, own colours, explanation) the user shall change the meaning and the colour; 'Standard' returns a built-in entry to the theme colour; the default text colour applies to file names (folder names stay blue).
+  acceptance: The new colour is shown everywhere in both themes.
+  priority: High
+  source: "'Change colour, legend and shortcuts for all colours' request"
+- id: REQ-LEG-005
+  title: Own shortcuts
+  text: For every legend entry except the explanation the user shall set the shortcut of the whole-name command and of the word command, or none; new own colours get free suggestions (Alt+5 ... Alt+9 / Alt+Shift+5 ... Alt+Shift+9).
+  acceptance: The new shortcut works, the old one no longer does.
+  priority: High
+  source: Custom shortcut request
+- id: REQ-LEG-006
+  title: Fixed command prefix
+  text: The command names shall keep their fixed beginning 'Colour line:' / 'Colour word / selection:' followed by the user-defined meaning.
+  acceptance: "Renaming 'Accepted' to 'Approved' gives 'Colour line: Approved'."
+  priority: Medium
+  source: Custom shortcut request
+- id: REQ-LEG-007
+  title: Input validation
+  text: The colour dialog shall refuse an empty meaning, a meaning already in the legend (ignoring case), a colour already used (including explanation, folder and tree-line colours), the same key for both commands, keys used by any other command, by the editor (copy/paste ...) or by a menu (Alt+F ...), and keys that would type text.
+  acceptance: A message explains the reason; nothing is changed.
+  priority: High
+  source: Legend requests (production level)
+- id: REQ-LEG-008
+  title: Remove own colours
+  text: Own colours shall be removable (legend menu, Edit legend…, button in the colour dialog); if used, the user is asked first and those names / words get the default colour; built-in colours cannot be removed.
+  acceptance: The colour disappears from legend, menus and shortcuts.
+  priority: High
+  source: "'I cannot delete a custom colour' report"
+- id: REQ-LEG-009
+  title: Remove from the default legend too
+  text: If the colour is also in the saved default legend, the user shall choose 'Remove everywhere' (also from the default, so new trees no longer get it), 'Only from this tree' or Cancel.
+  acceptance: After 'Remove everywhere' new trees and new starts no longer show the colour.
+  priority: High
+  source: "'I cannot delete a custom colour' report"
+- id: REQ-LEG-010
+  title: Save as default / load default
+  text: "'Save as default' shall store the legend (meanings, colours, shortcuts, own colours) in nodeon_colours.json in the user settings folder (or the file in NODEON_COLORS_FILE) and use it for every new tree and new start; 'Load default' adds its colours to the open tree."
+  acceptance: A new tree shows the saved legend.
+  priority: High
+  source: Legend request ('save configuration as default')
+- id: REQ-LEG-011
+  title: Legend stored per tree
+  text: Each tree shall keep its own legend in its marks file; older legend files (without shortcuts, with 'slot' numbers) shall be read correctly.
+  acceptance: Reopening a tree shows its own legend.
+  priority: High
+  source: Legend request
+- id: REQ-LEG-012
+  title: Edit legend window
+  text: "'Edit legend…' shall list all colours with meaning and shortcuts and offer Add, Edit (also by double-click), Remove (own colours only), Save as default and Close."
+  acceptance: Changes made there appear immediately in the legend.
+  priority: Medium
+  source: Custom colour delete request
+- id: REQ-LEG-013
+  title: Broken default legend
+  text: A damaged default legend file shall be ignored with a warning; the standard legend is used.
+  acceptance: "Status: 'The default colour legend could not be read ...'."
+  priority: Medium
+  source: Production-level request
+
+# ----------------------------------------------------------------------------- SAFE
+- id: REQ-SAFE-001
+  title: Unexpected error dialog
+  text: An unexpected error shall show a dialog with the details and the advice to save under a new name; the text stays in the editor.
+  acceptance: The application does not close by itself.
+  priority: High
+  source: Production-level request
+- id: REQ-SAFE-002
+  title: Editing never loses text
+  text: No command shall change or lose text outside the lines it is meant to change.
+  acceptance: Regression suite compares the full text after each command.
+  priority: High
+  source: "'Don't change anything else' (every request)"
+
+# ----------------------------------------------------------------------------- ITEM
+- id: REQ-ITEM-001
+  title: Item details panel
+  text: "The software shall show, on the right side of the window, a panel with the name and the position in the tree of the item (branch) at the cursor; on a line without an item it shall say so. The panel can be hidden and shown (View menu); the choice is remembered."
+  acceptance: "Cursor on 'Hammer': the panel shows 'Hammer' and 'garage/ › Workbench/'; on an empty line it shows the hint; hidden after restart if it was hidden."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-002
+  title: Add pictures
+  text: "The software shall add one or more pictures to the item at the cursor by drag & drop of files (or picture data from a browser), by '+ Add images…' (file dialog with multi-select) and by pasting (Ctrl+V in the picture)."
+  acceptance: "After each way, the item has the added pictures in the order chosen; the window shows unsaved changes (*)."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-003
+  title: Only pictures are accepted
+  text: "Files that are not readable pictures (and folders) shall be refused with a message naming them; nothing else changes."
+  acceptance: "Dropping notes.txt and a fake .jpg adds nothing and the status bar names the files."
+  priority: Medium
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-004
+  title: Previous / next picture
+  text: "The software shall show one picture at a time with a counter (n / total) and allow going to the previous / next picture with buttons, the arrow keys in the picture and the thumbnail strip."
+  acceptance: "With 3 pictures, Next shows 2 / 3 and 3 / 3 and stops at the last; Left goes back; clicking a thumbnail shows that picture."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-005
+  title: Zoom
+  text: "The software shall zoom the picture in and out (buttons, + / −, mouse wheel), fit it to the panel (Fit, 0), show it at 100 % (1) and allow moving it by dragging; the zoom is kept while the tree text is re-read."
+  acceptance: "Zoom in twice = fit x 1.25²; Fit returns to the fitted size; zoom limits 2 % … 3200 %."
+  priority: Medium
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-006
+  title: Large viewer
+  text: "Double-click (or ⤢) shall open the item's pictures in a large window with the same navigation and zoom; the panel follows the picture shown there."
+  acceptance: "Next in the large window moves the panel's counter as well."
+  priority: Medium
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-007
+  title: Remove a picture
+  text: "The software shall remove the shown picture from the item after a confirmation (Remove button, Delete key in the picture, context menu)."
+  acceptance: "Answering No keeps the picture; Yes removes only that picture."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-008
+  title: Change the order of pictures
+  text: "The order of an item's pictures shall be changeable by dragging a thumbnail and with the ◂ / ▸ buttons; the moved picture stays shown."
+  acceptance: "Moving the first picture right gives the order 2, 1, 3."
+  priority: Medium
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-009
+  title: Must-have features
+  text: "Below the pictures the software shall show a scrollable 'Must-have features' box (one feature per line) with a light green header that shows the number of features."
+  acceptance: "Typed features are stored with the item; the header ends with the count."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-010
+  title: Features to avoid
+  text: "Below 'Must-have features' the software shall show a scrollable 'Features to avoid' box (one feature per line) with a light red header that shows the number of features."
+  acceptance: "Typed features are stored with the item; the header is red."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-011
+  title: Item database next to the tree
+  text: "Pictures and features shall be saved together with the tree (File > Save) in the folder <name>.txt.items/ (items.json + images/ with copies of the pictures); the .txt file stays pure text. Changes mark the tree as unsaved and closing asks to save."
+  acceptance: "After saving, items.json lists the item by its path and images/ holds the copies; reopening shows them again."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-012
+  title: Details stay with their row
+  text: "Pictures and features shall stay with their row when it is moved, indented / outdented, renamed, when rows are added or deleted around it and through Undo / Redo."
+  acceptance: "Random editing and Undo of everything restores every item's own pictures and features; no row ever shows another row's data."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-013
+  title: Discard, Save As and clean-up
+  text: "'Discard' shall leave the stored pictures and database unchanged; 'Save As' shall copy the pictures to the new place and keep the original; pictures removed from all items shall be deleted from images/ when saving."
+  acceptance: "See TC-ITEM-013."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-014
+  title: Damaged or missing item data
+  text: "A missing picture file shall be shown as 'missing' without an error; an unreadable items.json shall be reported, kept as a backup when saving, and no picture shall be deleted; a write error shall be reported and the tree stays marked unsaved."
+  acceptance: "See TC-ITEM-014."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-015
+  title: Keys while typing in the panel
+  text: "While the keyboard focus is in the panel, tree commands (e.g. Ctrl+D, Ctrl+Q, Alt+G) shall not change the tree and shall not type characters; editing keys, AltGr characters and Save / Open still work."
+  acceptance: "Pressing tree shortcuts in a feature box leaves the tree unchanged; Ctrl+S saves."
+  priority: High
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-016
+  title: Comfortable colours
+  text: "The section headers shall use light, soft green / red tones that stay readable in the light and the dark theme."
+  acceptance: "Header backgrounds: green / red hue; light theme lightness > 190 of 255; dark theme dark backgrounds."
+  priority: Low
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+- id: REQ-ITEM-017
+  title: Large trees
+  text: "With about 2000 rows and 400 items with details, saving and opening shall each take less than 10 seconds."
+  acceptance: "Measured by TC-ITEM-017."
+  priority: Medium
+  source: "User request 2026-10-30 (organizing app - pictures and features per row)"
+
+# ----------------------------------------------------------------------------- TOOL
+- id: REQ-TOOL-001
+  title: Traceability report shows every requirement
+  text: The generated HTML traceability report shall list every requirement with its test cases and the latest result of every test tool.
+  acceptance: The number of rows equals the number of requirements.
+  priority: High
+  source: QMS tool validation (ISO 13485 4.1.6)
+- id: REQ-TOOL-002
+  title: Report filters
+  text: The report shall filter by text and by status (all, passed, failed, not covered).
+  acceptance: Typing a requirement id shows only that row.
+  priority: Medium
+  source: QMS tool validation
+- id: REQ-TOOL-003
+  title: Report summary
+  text: The report shall show totals (requirements, covered, passed, failed) that match the rows.
+  acceptance: Summary numbers equal the counted rows.
+  priority: High
+  source: QMS tool validation

@@ -1,0 +1,17 @@
+{
+  "requirements": 120,
+  "test_cases": 103,
+  "tools_with_results": [
+    "dev",
+    "system",
+    "pytest-bdd",
+    "behave"
+  ],
+  "gate_errors": [],
+  "tc_status": {
+    "passed": 99,
+    "failed": 0,
+    "manual": 4,
+    "not run": 0
+  }
+}

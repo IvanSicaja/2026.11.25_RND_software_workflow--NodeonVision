@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Nodeon desktop system tests: Gherkin (shared ../../features) + Reqnroll + FlaUI (UIA3).
+    Windows only: FlaUI drives the real Nodeon window through Windows UI Automation.
+    Run:  dotnet test Nodeon.SystemTests --filter "Category!=python_only"
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>   <!-- only for the clipboard -->
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>Nodeon.SystemTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="NUnit" Version="4.2.2" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+    <PackageReference Include="Reqnroll.NUnit" Version="2.2.1" />
+    <PackageReference Include="FlaUI.UIA3" Version="4.0.0" />
+  </ItemGroup>
+
+  <!-- WinForms is only used for the clipboard. Its implicit usings would make
+       'Keys' and 'Application' ambiguous with FlaUI / our Support.Keys. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <!-- The SAME feature files as Behave and pytest-bdd (single source of truth). -->
+  <ItemGroup>
+    <ReqnrollFeatureFiles Include="..\..\features\*.feature" Link="Features\%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

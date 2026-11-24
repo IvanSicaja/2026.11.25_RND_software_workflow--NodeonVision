@@ -1,0 +1,1507 @@
+# =============================================================================
+# Nodeon - Test Specification - source data
+# -----------------------------------------------------------------------------
+# Every test case (TC) verifies one or more requirements (reqs) and can be run
+#   * MANUALLY  - follow "steps" (action -> expected result), record the result
+#                 in the generated manual protocol (05_Manual_Test_Protocol.xlsx)
+#   * AUTOMATED - by the tests listed in "automated" (existing unit / GUI
+#                 tests) and by every automated test whose NAME CONTAINS the TC
+#                 id (BDD scenarios "TC-FOLD-001 ...", pytest "test_TC_FOLD_001_...").
+#                 The report generator finds those automatically.
+#
+# Line numbers in the steps are the numbers in Nodeon's left margin (1 = first).
+# Test data: tests/test_automation/specs/test_data/
+#   tree_a.txt                   small tree with explanations (8 lines)
+#   tree_b_example_project.txt   the project tree (3 levels, 66 lines)
+#
+# Fields: level  Unit | Integration | System | Acceptance
+#         technique  how the test was designed (see the guide, chapter 6)
+# =============================================================================
+
+test_cases:
+
+# ------------------------------------------------------------------------- GEN
+- id: TC-GEN-001
+  title: Start with and without a tree file
+  reqs: [REQ-GEN-001, REQ-GEN-006]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: Python and PySide6 installed. A copy of tree_a.txt.
+  steps:
+    - ["Run: python main/main.py", "Window 'Untitled — Nodeon' opens with the text 'new-project/'."]
+    - ["Close it. Run: python main/main.py <path>/tree_a.txt", "Title 'tree_a.txt — Nodeon'; 8 lines are shown."]
+  automated: []
+
+- id: TC-GEN-002
+  title: Model file is always taken from the folder of main.py; clear errors otherwise
+  reqs: [REQ-GEN-002, REQ-GEN-003]
+  level: Integration
+  technique: Error guessing, equivalence classes (5 broken file kinds)
+  priority: High
+  preconditions: A copy of the project folder you may break.
+  steps:
+    - ["Start from the project root: python main/main.py; then from main/: python main.py", "Both start normally."]
+    - ["Rename main/treemodel.py and start", "Message 'The file treemodel.py was not found' with the expected path; app stops (no traceback window)."]
+    - ["Make treemodel.py empty (0 bytes) and start", "Message 'treemodel.py is empty'."]
+    - ["Put the content of main.py into treemodel.py and start", "Message that it is not Nodeon's file / contains main.py."]
+    - ["Restore the original file", "App starts normally again."]
+  automated:
+    - "gui: StartupTests::test_correct_file_loads"
+    - "gui: StartupTests::test_missing_file"
+    - "gui: StartupTests::test_empty_file"
+    - "gui: StartupTests::test_wrong_file"
+    - "gui: StartupTests::test_broken_file"
+    - "gui: StartupTests::test_app_uses_file_next_to_main"
+
+- id: TC-GEN-003
+  title: Settings of the old name 'Tree Editor' are taken over
+  reqs: [REQ-GEN-004]
+  level: Integration
+  technique: Use case
+  priority: Low
+  preconditions: Settings stored under organisation/application 'TreeEditor', none under 'Nodeon'.
+  steps:
+    - ["Start Nodeon", "Recent files, zoom and theme from the old settings are used."]
+  automated: []
+
+- id: TC-GEN-004
+  title: First start uses full height and half the width
+  reqs: [REQ-GEN-005]
+  level: System
+  technique: Use case
+  priority: Low
+  preconditions: No Nodeon settings yet (first start).
+  steps:
+    - ["Start Nodeon", "The window is as high as the screen (without task bar), half as wide, centred."]
+  automated: []
+
+# ------------------------------------------------------------------------- FMT
+- id: TC-FMT-001
+  title: The project tree is reproduced exactly (structure, last child, spacers)
+  reqs: [REQ-FMT-001, REQ-FMT-002, REQ-FMT-003, REQ-FMT-007]
+  level: Integration
+  technique: Round trip (open -> save -> compare)
+  priority: High
+  preconditions: Copy of tree_b_example_project.txt.
+  steps:
+    - ["Open the file and save it without changes (Ctrl+S)", "The saved file is byte-identical to the original."]
+    - ["Check any line with a sub-tree", "Children use '├── ', the last child '└── '; every level is 4 columns wide; empty '│' lines are still there."]
+  automated:
+    - "unit: ParseRender::test_example_is_stable"
+    - "unit: ParseRender::test_canonical_output"
+
+- id: TC-FMT-002
+  title: Explanations start with ➡️ (also ➡ without emoji selector)
+  reqs: [REQ-FMT-004]
+  level: Unit
+  technique: Equivalence classes
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Look at line 3", "'Source code' after ➡️ is shown in the explanation colour (violet)."]
+    - ["Edit a branch (Ctrl+Shift+E), add an explanation, OK, save", "The file contains '➡️ <your text>'."]
+  automated:
+    - "unit: ArrowMarker::test_reads_arrow_plain_arrow_and_hash"
+    - "unit: ArrowMarker::test_writes_arrow"
+    - "unit: ArrowMarker::test_line_segments_with_arrow"
+    - "unit: ArrowMarker::test_explanation_alone_and_empty"
+    - "gui: GuiTests::test_new_explanation_written_with_arrow"
+
+- id: TC-FMT-003
+  title: '"#" is ordinary text'
+  reqs: [REQ-FMT-005, REQ-MARK-005]
+  level: System
+  technique: Negative test
+  priority: High
+  preconditions: A new tree.
+  steps:
+    - ["Type 'src/   # note' as a name", "The whole text has the name colour; no violet."]
+    - ["Save and reopen", "The line is unchanged; no ➡️ was added."]
+  automated:
+    - "unit: ArrowMarker::test_hash_is_normal_text"
+    - "unit: ArrowMarker::test_name_with_hash_inside_is_kept"
+    - "gui: GuiTests::test_hash_is_normal_text_everywhere"
+    - "gui: GuiTests::test_typing_hash_vs_arrow"
+    - "gui: GuiTests::test_alignment_ignores_hash"
+
+- id: TC-FMT-004
+  title: Multi-line explanations and empty lines are kept
+  reqs: [REQ-FMT-006, REQ-FMT-007]
+  level: Unit
+  technique: Round trip
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Line 7 '│   ➡️ second line' belongs to docs/: open the edit dialog on line 6", "The explanation box shows two lines: 'Documentation' and 'second line'."]
+    - ["Cancel, save, compare the file", "Unchanged."]
+  automated:
+    - "unit: ParseRender::test_multiline_comment_and_gaps"
+    - "unit: Spacers::test_spacers_round_trip"
+
+- id: TC-FMT-005
+  title: ASCII trees, tabs, NBSP and plain indentation are read
+  reqs: [REQ-FMT-008]
+  level: Unit
+  technique: Equivalence classes
+  priority: Medium
+  preconditions: tree_c_ascii.txt.
+  steps:
+    - ["Open tree_c_ascii.txt", "It is shown as a tree with fold arrow on 'src'."]
+    - ["Press Ctrl+Alt+L", "The lines become '├── src', '│   ├── main.py', '│   └── util.py', '└── docs'."]
+  automated:
+    - "unit: ParseRender::test_ascii_and_tabs"
+
+- id: TC-FMT-006
+  title: Format document aligns explanations and is idempotent
+  reqs: [REQ-FMT-009]
+  level: Integration
+  technique: Invariant (formatting twice = once)
+  priority: High
+  preconditions: tree_a.txt open; move explanations with Alt+Right twice.
+  steps:
+    - ["Press Ctrl+Alt+L", "Consecutive siblings share one ➡️ column; column >= 35; >= 3 spaces after the longest name."]
+    - ["Press Ctrl+Alt+L again", "Nothing changes."]
+  automated:
+    - "gui: GuiTests::test_format_document_still_auto_aligns"
+    - "unit: ExplanationColumns::test_canonical_format_unchanged"
+
+- id: TC-FMT-007
+  title: Text above the tree is kept
+  reqs: [REQ-FMT-010]
+  level: Unit
+  technique: Boundary (before the first branch)
+  priority: Low
+  preconditions: A file whose first line is '➡️ notes' followed by a tree.
+  steps:
+    - ["Open, save, compare", "The first line is unchanged."]
+  automated: []
+
+# ------------------------------------------------------------------------- FILE
+- id: TC-FILE-001
+  title: Open a tree (menu, recent list, drag & drop)
+  reqs: [REQ-FILE-001]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: tree_a.txt.
+  steps:
+    - ["File > Open…, choose tree_a.txt", "Tree shown, title 'tree_a.txt — Nodeon'."]
+    - ["Drag tree_b_example_project.txt from the file explorer onto the editor", "That file is opened."]
+  automated: []
+
+- id: TC-FILE-002
+  title: Save writes the file safely
+  reqs: [REQ-FILE-002, REQ-FMT-001]
+  level: System
+  technique: Use case, fault injection (write-protected folder)
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Add an item 'new.txt' and press Ctrl+S", "The file on disk contains the new line and ends with a line break; '*' disappears from the title."]
+    - ["Make the folder read-only, change something, Ctrl+S", "Error message 'Could not save'; the old file is unchanged."]
+  automated: []
+
+- id: TC-FILE-003
+  title: Line endings, BOM and final line break
+  reqs: [REQ-FILE-003]
+  level: Integration
+  technique: Equivalence classes (LF, CRLF, BOM)
+  priority: High
+  preconditions: tree_d_crlf.txt, tree_e_bom.txt.
+  steps:
+    - ["Open tree_d_crlf.txt, change a name, save", "The file still uses CRLF line endings (check with a hex viewer / editor)."]
+    - ["Open tree_e_bom.txt", "The first line is 'root/' (no invisible character in front)."]
+  automated: []
+
+- id: TC-FILE-004
+  title: Binary and non-UTF-8 files
+  reqs: [REQ-FILE-004]
+  level: Integration
+  technique: Negative test
+  priority: Medium
+  preconditions: tree_f_binary.txt, tree_g_latin1.txt.
+  steps:
+    - ["Open tree_f_binary.txt", "Message 'This does not look like a text file'; current tree unchanged."]
+    - ["Open tree_g_latin1.txt", "Warning about UTF-8; 'caf�' is shown with a replacement character."]
+  automated: []
+
+- id: TC-FILE-005
+  title: Unsaved changes are never lost silently
+  reqs: [REQ-FILE-005]
+  level: System
+  technique: Decision table (Save / Discard / Cancel)
+  priority: High
+  preconditions: tree_a.txt open and changed (title shows *).
+  steps:
+    - ["File > New, answer Cancel", "Nothing happens; the change is still there."]
+    - ["File > New, answer Discard", "A new tree is shown; the file on disk is unchanged."]
+    - ["Change again, close the window, answer Save", "The file is saved, the window closes."]
+  automated: []
+
+- id: TC-FILE-006
+  title: Recent files
+  reqs: [REQ-FILE-006]
+  level: Integration
+  technique: Boundary (10 entries)
+  priority: Low
+  preconditions: 11 different tree files.
+  steps:
+    - ["Open the 11 files one after the other", "File > Open recent shows the last 10, newest first."]
+  automated: []
+
+- id: TC-FILE-007
+  title: Save keeps manually aligned explanations
+  reqs: [REQ-FILE-007, REQ-EXPL-006]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Press Alt+Right 5 times, then Ctrl+S", "The saved file has the ➡️ in the moved columns (not re-aligned automatically)."]
+  automated:
+    - "gui: GuiTests::test_save_keeps_manual_columns"
+
+# ------------------------------------------------------------------------- FOLD
+- id: TC-FOLD-001
+  title: Collapse all and expand all
+  reqs: [REQ-FOLD-003]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: tree_b_example_project.txt open.
+  steps:
+    - ["Press Alt+1", "Only 'project-name/' is visible; Levels box shows 0 / 3."]
+    - ["Press Alt+4", "All 66 lines are visible; Levels box shows 3 / 3."]
+  automated:
+    - "gui: GuiTests::test_folding_levels"
+
+- id: TC-FOLD-002
+  title: Collapse / expand one level for the whole document
+  reqs: [REQ-FOLD-004]
+  level: System
+  technique: State transition (levels 0..3)
+  priority: High
+  preconditions: tree_b_example_project.txt open, everything expanded.
+  steps:
+    - ["Press Alt+2", "Levels box 2 / 3; the deepest items (01_icons/ ...) are hidden."]
+    - ["Press Alt+2 again", "Levels box 1 / 3."]
+    - ["Press Alt+3", "Levels box 2 / 3."]
+  automated: []
+
+- id: TC-FOLD-003
+  title: Show exactly N levels
+  reqs: [REQ-FOLD-005]
+  level: System
+  technique: Boundary values (Ctrl+1, Ctrl+3, Ctrl+9 > maximum)
+  priority: Medium
+  preconditions: tree_b_example_project.txt open.
+  steps:
+    - ["Press Ctrl+1", "Levels box 1 / 3."]
+    - ["Press Ctrl+9", "Everything visible; Levels box 3 / 3."]
+  automated: []
+
+- id: TC-FOLD-004
+  title: Fold arrow click and Alt+click
+  reqs: [REQ-FOLD-001, REQ-FOLD-002]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: tree_b_example_project.txt open.
+  steps:
+    - ["Click the ▼ next to line 4 'assets/'", "Its sub-items disappear; the arrow becomes ▶."]
+    - ["Click it again", "Sub-items are visible again."]
+    - ["Alt+click the arrow of 'assets/'", "assets/ and 01_media/ are folded; Alt+click again opens both."]
+  automated: []
+
+- id: TC-FOLD-005
+  title: Toggle the branch at the cursor (Ctrl+. / Ctrl+Shift+. / Ctrl+Shift+,)
+  reqs: [REQ-FOLD-006, REQ-FOLD-002]
+  level: System
+  technique: Use case
+  priority: Medium
+  preconditions: tree_b_example_project.txt open, cursor on 'assets/'.
+  steps:
+    - ["Press Ctrl+.", "assets/ is folded."]
+    - ["Press Ctrl+.", "assets/ is open."]
+    - ["Press Ctrl+Shift+.", "assets/ and everything inside is folded; Ctrl+Shift+, opens all of it."]
+  automated: []
+
+- id: TC-FOLD-006
+  title: Badge '⋯ N items' after a folded branch
+  reqs: [REQ-FOLD-007]
+  level: System
+  technique: Use case
+  priority: Low
+  preconditions: tree_b_example_project.txt open.
+  steps:
+    - ["Fold 'docs/'", "Badge '⋯ 5 items' after the line."]
+    - ["Click the badge", "docs/ opens."]
+  automated: []
+
+- id: TC-FOLD-007
+  title: Folds survive typing, editing, alignment and colouring
+  reqs: [REQ-FOLD-008]
+  level: Integration
+  technique: Invariant (hidden lines unchanged)
+  priority: High
+  preconditions: tree_b_example_project.txt open; Ctrl+1.
+  steps:
+    - ["Type a character in line 1, press Alt+Right, press Alt+G on a line", "The same branches are still folded."]
+  automated:
+    - "gui: GuiTests::test_folds_survive_alignment"
+    - "gui: GuiTests::test_mark_survives_typing_and_folding"
+    - "gui: GuiTests::test_word_colour_hidden_lines_and_folding"
+
+- id: TC-FOLD-008
+  title: Cursor skips folded lines; Backspace expands first
+  reqs: [REQ-FOLD-009]
+  level: System
+  technique: State transition
+  priority: Medium
+  preconditions: tree_b_example_project.txt open, 'assets/' folded.
+  steps:
+    - ["Cursor on 'assets/', press Down", "Cursor is on the next VISIBLE line (after the folded part)."]
+    - ["Put the cursor at the start of that line and press Backspace", "assets/ is unfolded first (message 'Expanded the folded branch first'); no text deleted."]
+  automated: []
+
+# ------------------------------------------------------------------------- EDIT
+- id: TC-EDIT-001
+  title: Add item and add sub-item (keys and toolbar)
+  reqs: [REQ-EDIT-001, REQ-EDIT-002, REQ-UI-002]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: tree_a.txt open, cursor on line 4 'main.py'.
+  steps:
+    - ["Press Ctrl+Enter, type 'util.py'", "New line '│   ├── util.py' below main.py."]
+    - ["Click toolbar 'Add sub-item', type 'inner.txt'", "New line one level deeper below util.py."]
+  automated: []
+
+- id: TC-EDIT-002
+  title: Move branches up, down, left, right
+  reqs: [REQ-EDIT-003, REQ-EDIT-004]
+  level: System
+  technique: State transition, boundary (first / last position)
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Cursor on 'docs/' (line 6), press Alt+Shift+Up", "docs/ with its explanation lines is now above src/ and its sub-items."]
+    - ["Press Alt+Shift+Up again", "Message 'Already the first item in its branch'."]
+    - ["Cursor on 'README.md', press Alt+Shift+Right", "README.md becomes the last child of the item above."]
+    - ["Press Alt+Shift+Left", "README.md is back on the top level."]
+  automated:
+    - "unit: Operations::test_move"
+    - "unit: Operations::test_indent_outdent"
+
+- id: TC-EDIT-003
+  title: Duplicate and delete a branch
+  reqs: [REQ-EDIT-005, REQ-EDIT-006]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: tree_a.txt open, cursor on 'src/'.
+  steps:
+    - ["Press Ctrl+D", "A copy of src/ with main.py and a_really_long_module_name.py appears below src/'s branch."]
+    - ["Press Ctrl+Shift+Delete on the copy", "The copy and its 2 sub-items are gone; status 'Deleted branch and 2 sub-item(s)'."]
+  automated:
+    - "unit: Operations::test_delete_duplicate"
+
+- id: TC-EDIT-004
+  title: Delete line (Ctrl+Q) keeps sub-items; Ctrl+Q never quits
+  reqs: [REQ-EDIT-007, REQ-EDIT-008]
+  level: System
+  technique: Equivalence classes (branch / leaf / explanation / empty line)
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Cursor on 'src/' (line 3), press Ctrl+Q", "src/ line is gone; main.py and a_really_long_module_name.py are now top-level items; window still open."]
+    - ["Ctrl+Z", "Original text restored."]
+    - ["Cursor on line 7 (second explanation line), Ctrl+Q", "Only 'second line' is removed."]
+  automated:
+    - "unit: DeleteRow::test_branch_row_keeps_sub_items"
+    - "unit: DeleteRow::test_explanation_row"
+    - "unit: DeleteRow::test_leaf_row"
+    - "unit: DeleteRow::test_spacer_and_trailing_rows"
+    - "unit: DeleteRow::test_text_is_exactly_one_row_shorter"
+    - "gui: GuiTests::test_ctrl_q_deletes_leaf_line_only"
+    - "gui: GuiTests::test_ctrl_q_on_branch_keeps_sub_items"
+    - "gui: GuiTests::test_ctrl_q_on_explanation_and_empty_lines"
+    - "gui: GuiTests::test_ctrl_q_last_line_and_collapsed_branch"
+    - "gui: GuiTests::test_ctrl_q_marks_follow_lifted_items"
+    - "gui: GuiTests::test_ctrl_q_root_and_toolbar"
+
+- id: TC-EDIT-005
+  title: Insert an empty line with the vertical lines (Alt+Enter)
+  reqs: [REQ-EDIT-009]
+  level: System
+  technique: Equivalence classes (between siblings / open branch / folded / last line)
+  priority: Medium
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Cursor on 'main.py' (line 4), press Alt+Enter", "New line '│   │' between main.py and a_really_long_module_name.py."]
+    - ["Press Alt+Enter again", "A second '│   │' line."]
+  automated:
+    - "unit: Spacers::test_between_siblings_keeps_vertical_line"
+    - "unit: Spacers::test_inside_branch_keeps_both_lines"
+    - "unit: Spacers::test_after_last_child_goes_to_next_branch"
+    - "gui: GuiTests::test_alt_enter_between_siblings"
+    - "gui: GuiTests::test_alt_enter_on_open_branch_and_last_child"
+    - "gui: GuiTests::test_alt_enter_on_collapsed_branch_goes_below_it"
+    - "gui: GuiTests::test_alt_enter_last_line_undo_and_keys_kept"
+    - "gui: GuiTests::test_alt_enter_save_round_trip"
+
+- id: TC-EDIT-006
+  title: Edit name and explanation dialog (Ctrl+Shift+E, Ctrl+E, F2 unused)
+  reqs: [REQ-EDIT-010, REQ-UI-002]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: tree_a.txt open, cursor on 'README.md'.
+  steps:
+    - ["Press F2", "Nothing happens."]
+    - ["Press Ctrl+Shift+E", "Dialog 'Edit branch' with name 'README.md' and explanation 'Overview'."]
+    - ["Change the explanation to two lines 'Overview' / 'Read me first', press Ctrl+Enter", "Two ➡️ lines under README.md, aligned."]
+    - ["Hover the toolbar button 'Explanation'", "Tooltip says 'Explanation - add or edit the explanation (and the name)'."]
+  automated:
+    - "gui: GuiTests::test_edit_shortcut_opens_dialog"
+    - "gui: GuiTests::test_explanation_button_label_and_tooltip"
+
+- id: TC-EDIT-007
+  title: Invalid names are refused in the dialog
+  reqs: [REQ-EDIT-011]
+  level: Integration
+  technique: Negative test
+  priority: Medium
+  preconditions: Edit dialog open.
+  steps:
+    - ["Enter the name 'a ➡️ b' and press OK", "Message 'Invalid name'; the dialog stays open."]
+  automated: []
+
+- id: TC-EDIT-008
+  title: Every structural command is one undo step
+  reqs: [REQ-EDIT-012]
+  level: Integration
+  technique: Invariant (undo restores)
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Do Alt+Shift+Up on docs/, then Ctrl+Z", "Exactly the original text."]
+    - ["Ctrl+Y", "The move is back."]
+  automated:
+    - "gui: GuiTests::test_undo_restores"
+
+# ------------------------------------------------------------------------- KEY
+- id: TC-KEY-001
+  title: Typing a list with Enter and Tab
+  reqs: [REQ-KEY-001]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: New tree (File > New).
+  steps:
+    - ["Type 'src/', Enter, 'main.py', Tab", "'└── src/' and '    └── main.py' (main.py inside src/)."]
+  automated:
+    - "gui: GuiTests::test_enter_tab_typing"
+
+- id: TC-KEY-002
+  title: Enter in the middle / at the start of a name
+  reqs: [REQ-KEY-002]
+  level: System
+  technique: Boundary (cursor position 0, middle, end)
+  priority: Medium
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Cursor between 'main' and '.py' in line 4, press Enter", "Two items 'main' and '.py'."]
+    - ["Ctrl+Z; cursor at the start of 'main.py', Enter", "An empty item above main.py."]
+  automated: []
+
+- id: TC-KEY-003
+  title: Finishing a list (Enter / Backspace on an empty item)
+  reqs: [REQ-KEY-003]
+  level: System
+  technique: State transition
+  priority: Medium
+  preconditions: tree_a.txt open, cursor at the end of 'main.py'.
+  steps:
+    - ["Press Enter", "Empty item '│   ├── ' below main.py."]
+    - ["Press Enter again", "The empty item moves one level left."]
+    - ["Press Backspace", "The empty item is removed."]
+  automated: []
+
+- id: TC-KEY-004
+  title: Tab outside branch lines, Shift+Enter
+  reqs: [REQ-KEY-004]
+  level: Integration
+  technique: Equivalence classes
+  priority: Low
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Cursor on the empty line 2, press Tab", "4 spaces are inserted."]
+    - ["At the end of line 1 press Shift+Enter", "A plain new line without a connector."]
+  automated: []
+
+- id: TC-KEY-005
+  title: Application shortcuts win over editor keys
+  reqs: [REQ-KEY-005]
+  level: Integration
+  technique: Error guessing
+  priority: High
+  preconditions: tree_a.txt open, cursor on 'docs/'.
+  steps:
+    - ["Press Alt+Shift+Up", "docs/ moves up (the editor does not just select text)."]
+  automated: []
+
+# ------------------------------------------------------------------------- EXPL
+- id: TC-EXPL-001
+  title: Alt+Right brings all explanations into one column
+  reqs: [REQ-EXPL-001, REQ-EXPL-004]
+  level: System
+  technique: State transition
+  priority: High
+  preconditions: tree_a.txt open (line 5 has ➡️ one column further right).
+  steps:
+    - ["Press Alt+Right 4 times", "Lines 3, 4, 6, 7, 8 move, line 5 waits; status 'Explanations moved right (whole document)'."]
+    - ["Press Alt+Right once more", "All ➡️ in one column."]
+  automated:
+    - "gui: GuiTests::test_alt_right_whole_document_aligns"
+    - "unit: ExplanationColumns::test_move_right_realigns"
+    - "unit: ExplanationColumns::test_mixed_columns_converge"
+
+- id: TC-EXPL-002
+  title: Alt+Left stops 3 spaces after the text, others stay aligned
+  reqs: [REQ-EXPL-002, REQ-EXPL-003]
+  level: System
+  technique: Boundary values (3 spaces)
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Press Alt+Left many times (>= 30)", "Every ➡️ is exactly 3 spaces after its name; explanations of the same branch stay aligned."]
+  automated:
+    - "gui: GuiTests::test_alt_left_stops_three_spaces_after_text"
+    - "unit: ExplanationColumns::test_move_left_until_text_then_others_stay_aligned"
+    - "unit: ExplanationColumns::test_preserve_is_stable_and_pushes_only_blocked_lines"
+
+- id: TC-EXPL-003
+  title: Only the selected lines move; the selection stays
+  reqs: [REQ-EXPL-001]
+  level: System
+  technique: Equivalence classes (selection / whole document)
+  priority: Medium
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Select lines 3-4, press Alt+Right twice", "Only lines 3 and 4 move; the selection is still there."]
+  automated:
+    - "gui: GuiTests::test_selection_only_moves_selected_and_is_kept"
+    - "gui: GuiTests::test_no_explanations_message"
+
+- id: TC-EXPL-004
+  title: A multi-line explanation moves as one block
+  reqs: [REQ-EXPL-005]
+  level: Unit
+  technique: Invariant
+  priority: Medium
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Press Alt+Right", "Lines 6 and 7 (docs/) keep the same ➡️ column."]
+  automated:
+    - "unit: ExplanationColumns::test_multiline_explanation_moves_as_one"
+    - "unit: ExplanationColumns::test_parse_records_column"
+    - "unit: ExplanationColumns::test_no_explanations"
+
+- id: TC-EXPL-005
+  title: Columns are kept when branches are edited; new explanations join their siblings
+  reqs: [REQ-EXPL-006]
+  level: Integration
+  technique: Invariant
+  priority: High
+  preconditions: tree_a.txt open; Alt+Right 5 times.
+  steps:
+    - ["Move README.md up (Alt+Shift+Up)", "All ➡️ keep their column."]
+  automated:
+    - "gui: GuiTests::test_structural_edit_keeps_manual_columns"
+    - "unit: ExplanationColumns::test_new_explanation_joins_sibling_column"
+
+# ------------------------------------------------------------------------- PASTE
+- id: TC-PASTE-001
+  title: Pasting several lines creates siblings on the same level
+  reqs: [REQ-PASTE-001]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: tree_a.txt open; copy the 3 non-empty lines of paste_word_lines.txt (e.g. from Word / a PDF).
+  steps:
+    - ["Cursor at the end of 'main.py', Enter (new empty item), Ctrl+V", "Three items 'First requirement', 'Second requirement', 'Third requirement' on main.py's level; a_really_long_module_name.py still below them."]
+    - ["Ctrl+Z", "Text before the paste."]
+  automated:
+    - "gui: GuiTests::test_paste_lines_become_siblings_on_same_level"
+    - "gui: GuiTests::test_paste_into_empty_new_branch_inside_a_branch"
+    - "gui: GuiTests::test_paste_after_branch_with_children_keeps_its_children"
+
+- id: TC-PASTE-002
+  title: Line breaks and empty lines from Word / PDF are cleaned up
+  reqs: [REQ-PASTE-002]
+  level: Integration
+  technique: Equivalence classes (CR LF, Word paragraph break, vertical tab, tabs, NBSP)
+  priority: Medium
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Paste 'One<CR LF><CR LF>Two' at the end of a name", "Two items, no empty item."]
+    - ["Paste 'solo<LF>'", "Only 'solo' is added to the name; no new line."]
+  automated:
+    - "unit: PasteAndColumns::test_paste_lines"
+    - "gui: GuiTests::test_paste_only_blank_lines_does_nothing"
+    - "gui: GuiTests::test_paste_single_line_and_copied_tree_unchanged"
+
+- id: TC-PASTE-003
+  title: Paste into an explanation and onto an empty line
+  reqs: [REQ-PASTE-003]
+  level: System
+  technique: Equivalence classes
+  priority: Medium
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Cursor at the end of 'Source code', paste two lines", "src/ has three explanation lines, aligned."]
+    - ["Cursor on line 2 '│', paste two lines", "Two new top-level items above src/."]
+  automated:
+    - "gui: GuiTests::test_paste_into_explanation_adds_explanation_lines"
+    - "gui: GuiTests::test_paste_on_empty_spacer_line"
+    - "gui: GuiTests::test_paste_lines_with_arrow_get_explanations_and_marks_kept"
+
+- id: TC-PASTE-004
+  title: Paste replaces a selection, keeps a leading space, one undo
+  reqs: [REQ-PASTE-004]
+  level: System
+  technique: Use case
+  priority: Medium
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Select 'README.md', paste 'P<LF>Q'", "Items 'P' and 'Q'."]
+    - ["Ctrl+Z once", "README.md is back."]
+  automated:
+    - "gui: GuiTests::test_paste_replaces_selection_one_undo_step"
+    - "gui: GuiTests::test_paste_in_middle_of_name_and_undo"
+    - "gui: GuiTests::test_paste_keeps_space_before_first_word"
+
+- id: TC-PASTE-005
+  title: A copied piece of tree is pasted as it is
+  reqs: [REQ-PASTE-005]
+  level: Integration
+  technique: Negative test
+  priority: Medium
+  preconditions: New tree.
+  steps:
+    - ["Paste '├── b<LF>└── c' at the end", "Exactly these lines appear."]
+  automated:
+    - "unit: PasteAndColumns::test_looks_like_tree"
+
+# ------------------------------------------------------------------------- COL
+- id: TC-COL-001
+  title: Column mode on / off (shortcut, button, badge)
+  reqs: [REQ-COL-001]
+  level: System
+  technique: State transition
+  priority: Medium
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Press Alt+Shift+Insert", "'Column select' button pressed; blue COLUMN badge in the status bar."]
+    - ["Press Alt+Shift+Insert again", "Button released; badge gone."]
+  automated:
+    - "gui: GuiTests::test_column_toggle_shortcut_button_and_status"
+    - "gui: GuiTests::test_column_mode_off_normal_editing_unchanged"
+
+- id: TC-COL-002
+  title: Select a rectangle and type on all rows
+  reqs: [REQ-COL-002, REQ-COL-003]
+  level: System
+  technique: Use case
+  priority: Medium
+  preconditions: A tree with 3 sibling lines 'alpha', 'beta', 'gamma'; column mode on; cursor before 'alpha'.
+  steps:
+    - ["Shift+Down twice, type 'x_'", "'x_alpha', 'x_beta', 'x_gamma'."]
+    - ["Ctrl+Z twice", "Original text."]
+  automated:
+    - "gui: GuiTests::test_column_select_and_type_on_all_rows"
+    - "gui: GuiTests::test_column_selection_converted_from_normal_selection"
+    - "gui: GuiTests::test_column_mouse_drag"
+
+- id: TC-COL-003
+  title: Backspace, Delete, Tab, Shift+Tab and virtual space in column mode
+  reqs: [REQ-COL-003]
+  level: Integration
+  technique: Equivalence classes
+  priority: Medium
+  preconditions: As TC-COL-002.
+  steps:
+    - ["Select 4 columns on 2 rows, type 'Z', Backspace, Delete", "The same change on both rows."]
+    - ["Tab / Shift+Tab before the ➡️ on 3 rows", "All ➡️ move 4 columns right / back left (only spaces are removed)."]
+  automated:
+    - "gui: GuiTests::test_column_replace_rectangle_and_backspace_delete"
+    - "gui: GuiTests::test_column_tab_and_shift_tab"
+    - "gui: GuiTests::test_column_virtual_space_beyond_line_end"
+
+- id: TC-COL-004
+  title: Copy, cut and paste a column
+  reqs: [REQ-COL-004]
+  level: Integration
+  technique: Round trip
+  priority: Medium
+  preconditions: As TC-COL-002.
+  steps:
+    - ["Select 4 columns on 3 rows, Ctrl+C, Ctrl+X, Ctrl+V", "Clipboard was 'alph\\nbeta\\ngamm'; after paste the text is unchanged."]
+  automated:
+    - "gui: GuiTests::test_column_copy_cut_paste"
+
+- id: TC-COL-005
+  title: Leaving the rectangle, folded lines, AltGr
+  reqs: [REQ-COL-005]
+  level: Integration
+  technique: Error guessing
+  priority: Low
+  preconditions: Column mode on.
+  steps:
+    - ["Make a rectangle, press Esc", "Rectangle gone; COLUMN badge still there."]
+    - ["Type AltGr+2 (@ on Swiss keyboards) in a rectangle", "'@' on every row."]
+  automated:
+    - "gui: GuiTests::test_column_ends_on_other_edits_escape_and_folds"
+    - "gui: GuiTests::test_column_altgr_characters"
+
+# ------------------------------------------------------------------------- FIND
+- id: TC-FIND-001
+  title: Find next, previous, match case, wrap around, not found
+  reqs: [REQ-FIND-001]
+  level: System
+  technique: Equivalence classes
+  priority: Medium
+  preconditions: tree_b_example_project.txt open.
+  steps:
+    - ["Ctrl+F, type 'models', Enter", "First 'models' selected."]
+    - ["F3 several times", "Next matches; at the end 'Wrapped around'."]
+    - ["Search 'xyz-not-there'", "'Not found'."]
+    - ["Esc", "Find bar closed; cursor back in the editor."]
+  automated: []
+
+- id: TC-FIND-002
+  title: Find opens folded branches
+  reqs: [REQ-FIND-002]
+  level: System
+  technique: Use case
+  priority: Medium
+  preconditions: tree_b_example_project.txt open; Alt+1.
+  steps:
+    - ["Ctrl+F, '02_tableau', Enter", "viz/ opens; 02_tableau is selected and visible."]
+  automated: []
+
+# ------------------------------------------------------------------------- UI
+- id: TC-UI-001
+  title: Toolbar content, order, captions and tooltips
+  reqs: [REQ-UI-001, REQ-UI-002]
+  level: System
+  technique: Checklist
+  priority: Medium
+  preconditions: Nodeon open, wide window.
+  steps:
+    - ["Compare both toolbar rows with REQ-UI-002", "Same buttons in the same order; 'Delete branch' is last."]
+    - ["Read the small text under each button", "The shortcut of the command (e.g. Collapse all: Alt+1)."]
+  automated:
+    - "gui: GuiTests::test_explanation_button_label_and_tooltip"
+    - "gui: GuiTests::test_ctrl_q_root_and_toolbar"
+
+- id: TC-UI-002
+  title: Light / dark theme
+  reqs: [REQ-UI-003]
+  level: System
+  technique: Use case
+  priority: Low
+  preconditions: tree_b_example_project.txt open, Ctrl+1.
+  steps:
+    - ["View > Dark theme (on / off)", "All colours change; the folds stay; arrows still visible."]
+    - ["Restart Nodeon", "The chosen theme is used."]
+  automated:
+    - "gui: GuiTests::test_legend_follows_theme"
+
+- id: TC-UI-003
+  title: Zoom
+  reqs: [REQ-UI-004]
+  level: System
+  technique: Boundary values (6 / 12 / 48 pt)
+  priority: Low
+  preconditions: Nodeon open.
+  steps:
+    - ["Ctrl+= ten times, then Ctrl+0", "Text grows; Ctrl+0 returns to the normal size."]
+    - ["Ctrl+- many times", "Text gets smaller but stays readable (6 pt minimum)."]
+  automated: []
+
+- id: TC-UI-004
+  title: Colours of tree lines, folders, files and explanations
+  reqs: [REQ-UI-005]
+  level: System
+  technique: Checklist
+  priority: Medium
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Look at line 3", "'├──' muted, 'src/' bold blue, '➡️ Source code' violet."]
+    - ["Look at line 4", "'main.py' default text colour."]
+  automated:
+    - "gui: GuiTests::test_comment_colour_comes_from_theme"
+    - "gui: GuiTests::test_comment_colour_is_not_text_or_mark_colour"
+
+- id: TC-UI-005
+  title: Status bar breadcrumb and cursor position
+  reqs: [REQ-UI-006]
+  level: System
+  technique: Use case
+  priority: Low
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Cursor in line 4", "Status bar: 'project/ › src/ › main.py' and 'Ln 4, Col …'."]
+  automated: []
+
+- id: TC-UI-006
+  title: F1 shortcut list and About
+  reqs: [REQ-UI-007]
+  level: System
+  technique: Checklist
+  priority: Low
+  preconditions: Nodeon open.
+  steps:
+    - ["Press F1", "List with all shortcuts including the colour shortcuts (Accepted: Whole name Alt+G ...)."]
+    - ["Help > About", "'Nodeon 1.0.0'."]
+  automated: []
+
+- id: TC-UI-007
+  title: Settings dialog
+  reqs: [REQ-UI-008]
+  level: System
+  technique: Use case
+  priority: Low
+  preconditions: tree_a.txt open.
+  steps:
+    - ["View > Settings…, set the minimum column to 40, OK", "Explanations are re-aligned at column 41 or more."]
+  automated: []
+
+- id: TC-UI-008
+  title: Visual review on a real screen (look & feel, HiDPI, Windows)
+  reqs: [REQ-UI-001, REQ-UI-002, REQ-UI-003, REQ-UI-005, REQ-GEN-005]
+  level: Acceptance
+  technique: Exploratory / checklist (manual only - needs human eyes)
+  priority: Medium
+  preconditions: Real Windows PC, 100 % and 150 % display scaling.
+  steps:
+    - ["Start Nodeon on both scalings, check icons, captions, legend, dialogs", "Nothing cut off, readable, consistent; colours distinguishable."]
+  automated: []
+  manual_only: true
+
+# ------------------------------------------------------------------------- MARK
+- id: TC-MARK-001
+  title: Colour the whole name (one line and a selection)
+  reqs: [REQ-MARK-001]
+  level: System
+  technique: Equivalence classes (3 colours, 1 line / several lines)
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Cursor on 'src/', Alt+G", "'src/' green; '➡️ Source code' still violet; '├──' unchanged."]
+    - ["Select lines 3-5, Alt+O", "All three names orange."]
+  automated:
+    - "gui: GuiTests::test_mark_colours_only_the_name"
+    - "gui: GuiTests::test_mark_selection"
+
+- id: TC-MARK-002
+  title: Colour a word at the cursor or a selection
+  reqs: [REQ-MARK-002]
+  level: System
+  technique: Boundary values (cursor at start / inside / end of a word)
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Cursor inside 'module' of 'a_really_long_module_name.py' (no selection), Alt+Shift+R", "The whole word 'a_really_long_module_name.py' is red."]
+    - ["Select only 'really', Alt+Shift+G", "Only 'really' green."]
+  automated:
+    - "unit: WordAtCursor::test_inside_and_borders"
+    - "unit: WordAtCursor::test_punctuation_and_dots"
+    - "gui: GuiTests::test_cursor_inside_name_word"
+    - "gui: GuiTests::test_cursor_at_name_borders"
+    - "gui: GuiTests::test_word_colour_only_selection_in_name"
+    - "gui: GuiTests::test_word_all_colours"
+    - "gui: GuiTests::test_selection_still_wins_over_word"
+    - "gui: GuiTests::test_selection_over_several_lines"
+
+- id: TC-MARK-003
+  title: Same key removes; default colour command
+  reqs: [REQ-MARK-003, REQ-MARK-004]
+  level: System
+  technique: State transition
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Cursor on 'README.md': Alt+G, Alt+G", "README.md back to the default colour."]
+    - ["Alt+R on 'a_really_long_module_name.py', then select 'really' and Alt+Shift+C", "'really' default colour, the rest of the name stays red."]
+  automated:
+    - "gui: GuiTests::test_same_key_again_and_alt_c_remove"
+    - "gui: GuiTests::test_line_default_colour"
+    - "gui: GuiTests::test_cursor_toggle_recolour_and_default"
+    - "gui: GuiTests::test_word_default_inside_line_coloured_name"
+    - "gui: GuiTests::test_word_default_when_already_default"
+    - "gui: GuiTests::test_line_command_overrides_word_defaults"
+    - "gui: GuiTests::test_partial_remove_and_recolour_partly_coloured_word"
+    - "gui: GuiTests::test_word_and_line_mark_together"
+    - "gui: GuiTests::test_default_colour_in_both_menus"
+
+- id: TC-MARK-004
+  title: Explanations, tree lines and spaces are never coloured
+  reqs: [REQ-MARK-005, REQ-MARK-006]
+  level: System
+  technique: Negative test
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Select 'Source code' and press Alt+Shift+G", "Still violet; status 'Nothing to colour here - explanations always keep their own colour'."]
+    - ["Cursor at column 1 of line 3, Alt+Shift+G", "Status 'No word at the cursor ...'."]
+  automated:
+    - "unit: WordAtCursor::test_nothing_on_spaces_or_symbols"
+    - "gui: GuiTests::test_explanation_selection_is_never_coloured"
+    - "gui: GuiTests::test_explanation_word_at_cursor_is_never_coloured"
+    - "gui: GuiTests::test_selection_over_name_and_explanation_colours_only_name"
+    - "gui: GuiTests::test_line_mark_never_colours_explanation"
+    - "gui: GuiTests::test_word_nothing_on_tree_lines_or_spaces"
+    - "gui: GuiTests::test_custom_colour_never_on_explanations"
+
+- id: TC-MARK-005
+  title: Colours follow moves, alignment, typing, folding and undo
+  reqs: [REQ-MARK-007]
+  level: Integration
+  technique: Invariant
+  priority: High
+  preconditions: tree_a.txt open; README.md red (Alt+R), 'docs' orange (word).
+  steps:
+    - ["Move README.md up, Alt+Right, type '_v2' after 'docs', fold / unfold src/, Ctrl+Z", "Colours stay on their name / word all the time."]
+    - ["Insert a character inside 'docs'", "Its colour disappears; Ctrl+Z brings it back."]
+  automated:
+    - "unit: WordSpans::test_resolve_follows_text"
+    - "unit: NodeKeys::test_keys_stable_after_moving_siblings"
+    - "gui: GuiTests::test_marks_follow_branches_and_undo"
+    - "gui: GuiTests::test_word_follows_alignment_moves_and_edits"
+    - "gui: GuiTests::test_word_gone_when_edited_back_with_undo"
+    - "gui: GuiTests::test_custom_mark_follows_branch_moves_and_undo"
+
+- id: TC-MARK-006
+  title: Colours are stored next to the tree and come back
+  reqs: [REQ-MARK-008]
+  level: System
+  technique: Round trip
+  priority: High
+  preconditions: tree_a.txt saved in a folder.
+  steps:
+    - ["Alt+G on src/", "File 'tree_a.txt.marks.json' appears next to tree_a.txt; tree_a.txt unchanged."]
+    - ["Close and reopen", "src/ is green."]
+    - ["Remove all colours", "The .marks.json file is deleted."]
+  automated:
+    - "gui: GuiTests::test_marks_saved_next_to_file_and_reloaded"
+    - "gui: GuiTests::test_word_colours_saved_and_reloaded"
+    - "gui: GuiTests::test_word_default_saved_and_reloaded"
+
+- id: TC-MARK-007
+  title: Broken and old marks files
+  reqs: [REQ-MARK-009]
+  level: Integration
+  technique: Fault injection
+  priority: Medium
+  preconditions: tree_a.txt with a marks file.
+  steps:
+    - ["Replace the marks file content by '{ not json', open the tree", "Tree opens; status 'Colour marks could not be read'."]
+  automated:
+    - "gui: GuiTests::test_broken_marks_file_is_ignored"
+    - "gui: GuiTests::test_old_explanation_colours_in_marks_file_are_ignored"
+    - "gui: GuiTests::test_old_marks_file_without_legend_still_loads"
+    - "unit: WordSpans::test_line_segments"
+    - "unit: WordSpans::test_add_merge_subtract"
+    - "unit: WordSpans::test_is_covered"
+    - "unit: NodeKeys::test_keys_are_paths_with_duplicate_numbers"
+
+- id: TC-MARK-008
+  title: Toolbar buttons 'Mark line' and 'Mark words'
+  reqs: [REQ-MARK-010]
+  level: System
+  technique: Checklist
+  priority: Medium
+  preconditions: Nodeon open.
+  steps:
+    - ["Click 'Mark line'", "Menu: Colour line: Accepted (Alt+G), To be approved (Alt+O), Rejected (Alt+R), Default colour (Alt+C)."]
+    - ["Compare the icons of both buttons", "Different icons (full bars vs. one coloured word)."]
+  automated:
+    - "gui: GuiTests::test_mark_toolbar_and_shortcut_texts"
+
+# ------------------------------------------------------------------------- LEG
+- id: TC-LEG-001
+  title: Legend is visible with the standard meanings
+  reqs: [REQ-LEG-001, REQ-LEG-002]
+  level: System
+  technique: Checklist
+  priority: High
+  preconditions: Fresh start without saved legend.
+  steps:
+    - ["Look at the bar under the editor", "'Legend: Not checked yet (only mentioned) · Accepted · To be approved · Rejected · Explanation' with matching colour dots."]
+    - ["View > Show colour legend (off / on)", "Legend hides / shows; remembered after restart."]
+  automated:
+    - "gui: GuiTests::test_legend_shows_every_meaning"
+    - "gui: GuiTests::test_legend_can_be_hidden_and_shown"
+
+- id: TC-LEG-002
+  title: Add an own colour and use it
+  reqs: [REQ-LEG-003]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Legend '+ Add colour', meaning 'Same on both robots', OK", "New legend entry; shortcuts Alt+5 / Alt+Shift+5 suggested."]
+    - ["Cursor on 'src/', Alt+5", "src/ in the new colour."]
+  automated:
+    - "gui: GuiTests::test_add_custom_colour_legend_menus_and_shortcuts"
+    - "gui: GuiTests::test_legend_chip_menu_applies_colour"
+    - "gui: GuiTests::test_suggested_shortcuts_and_more_than_five_colours"
+    - "gui: GuiTests::test_new_tree_gets_default_legend_not_document_legend"
+
+- id: TC-LEG-003
+  title: Change meaning and colour of every entry (incl. Standard)
+  reqs: [REQ-LEG-004, REQ-LEG-006]
+  level: System
+  technique: Equivalence classes (text / built-in / own / explanation)
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Legend 'Accepted' > Edit…: meaning 'Approved', colour #22aa44, OK", "Legend and menus show 'Colour line: Approved'; green names use #22aa44 in both themes."]
+    - ["Edit again, 'Standard', OK", "Theme green again."]
+    - ["Edit the explanation entry: colour #ff9fd0", "All explanations in that colour; still not colourable by commands."]
+  automated:
+    - "gui: GuiTests::test_edit_builtin_and_fixed_meanings"
+    - "gui: GuiTests::test_edit_custom_colour_label_and_colour"
+    - "gui: GuiTests::test_change_builtin_colour_and_back_to_standard"
+    - "gui: GuiTests::test_change_default_text_colour"
+    - "gui: GuiTests::test_change_explanation_colour_still_not_colourable"
+    - "gui: GuiTests::test_command_preview_keeps_fixed_prefix"
+
+- id: TC-LEG-004
+  title: Own shortcuts for colours
+  reqs: [REQ-LEG-005]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: tree_a.txt open.
+  steps:
+    - ["Edit 'Accepted': shortcut Alt+J / Alt+Shift+J", "Alt+J colours green; Alt+G does nothing; toolbar caption 'Alt+J/O/R/C'."]
+    - ["Edit 'Not checked yet': word shortcut 'None'", "Alt+Shift+C no longer works."]
+  automated:
+    - "gui: GuiTests::test_own_shortcuts_for_custom_colour"
+    - "gui: GuiTests::test_own_shortcuts_for_builtin_colour_and_caption"
+    - "gui: GuiTests::test_own_shortcuts_for_default_colour_and_none"
+    - "gui: GuiTests::test_own_shortcuts_saved_as_default"
+
+- id: TC-LEG-005
+  title: Wrong input in the colour dialog is refused
+  reqs: [REQ-LEG-007]
+  level: Integration
+  technique: Decision table / negative tests
+  priority: High
+  preconditions: Colour dialog open for an own colour.
+  steps:
+    - ["Empty meaning; 'accepted'; colour of the explanations; shortcut Ctrl+Q; Ctrl+C; Alt+F; 'K'; same key twice", "Each time a message names the reason; nothing is saved."]
+  automated:
+    - "gui: GuiTests::test_colour_dialog_validation"
+    - "gui: GuiTests::test_shortcut_conflicts_are_refused"
+    - "gui: GuiTests::test_changed_colours_count_for_validation"
+
+- id: TC-LEG-006
+  title: Remove an own colour
+  reqs: [REQ-LEG-008]
+  level: System
+  technique: Decision table (used / unused; Yes / Cancel)
+  priority: High
+  preconditions: Own colour used on src/.
+  steps:
+    - ["Legend > colour > Remove colour, Cancel", "Nothing changes."]
+    - ["Again, Yes", "Colour gone from legend and menus; src/ back to default colour."]
+    - ["Built-in colour menu", "'Remove colour' disabled."]
+  automated:
+    - "gui: GuiTests::test_remove_custom_colour_in_use"
+    - "gui: GuiTests::test_remove_unused_custom_without_question"
+    - "gui: GuiTests::test_remove_via_legend_menu_like_a_person"
+    - "gui: GuiTests::test_remove_from_colour_dialog_button"
+    - "gui: GuiTests::test_builtin_colours_cannot_be_removed"
+
+- id: TC-LEG-007
+  title: Remove a colour that is in the default legend
+  reqs: [REQ-LEG-009]
+  level: System
+  technique: Decision table (everywhere / only here / cancel)
+  priority: High
+  preconditions: Own colour saved as default.
+  steps:
+    - ["Remove colour > 'Remove everywhere'", "Gone; File > New and a restart no longer show it."]
+    - ["(Other run) 'Only from this tree'", "Gone here; File > New still shows it."]
+  automated:
+    - "gui: GuiTests::test_remove_saved_default_colour_everywhere"
+    - "gui: GuiTests::test_remove_saved_default_colour_only_here"
+    - "gui: GuiTests::test_ask_remove_default_real_message_box"
+
+- id: TC-LEG-008
+  title: Save as default and load default
+  reqs: [REQ-LEG-010]
+  level: System
+  technique: Use case
+  priority: High
+  preconditions: Own colour added, 'Accepted' renamed.
+  steps:
+    - ["Legend 'Save as default'", "Status names the file nodeon_colours.json."]
+    - ["File > New; restart Nodeon", "Same legend."]
+    - ["Open a tree with its own legend, 'Load default'", "Missing default colours are added; existing marks unchanged."]
+  automated:
+    - "gui: GuiTests::test_save_as_default_used_for_every_new_tree"
+    - "gui: GuiTests::test_load_default_merges_into_tree"
+    - "gui: GuiTests::test_tree_with_default_legend_needs_no_marks_file"
+
+- id: TC-LEG-009
+  title: Each tree keeps its own legend; old legend files are read
+  reqs: [REQ-LEG-011]
+  level: Integration
+  technique: Round trip, compatibility
+  priority: High
+  preconditions: Tree with an own colour.
+  steps:
+    - ["Close and reopen the tree", "Its legend (colour, meaning, shortcuts) is back."]
+  automated:
+    - "gui: GuiTests::test_custom_colour_saved_with_tree_and_reloaded"
+    - "gui: GuiTests::test_palette_file_validation"
+
+- id: TC-LEG-010
+  title: The 'Edit legend…' window
+  reqs: [REQ-LEG-012]
+  level: System
+  technique: Use case
+  priority: Medium
+  preconditions: An own colour exists.
+  steps:
+    - ["Legend 'Edit legend…'", "List of 6 rows with meaning and shortcuts; 'Remove' only enabled for the own colour."]
+    - ["Double-click a row, change the meaning", "List and legend show the new meaning."]
+  automated:
+    - "gui: GuiTests::test_legend_dialog_lists_edits_and_removes"
+
+- id: TC-LEG-011
+  title: Damaged default legend file
+  reqs: [REQ-LEG-013]
+  level: Integration
+  technique: Fault injection
+  priority: Medium
+  preconditions: nodeon_colours.json contains '{ broken'.
+  steps:
+    - ["Start Nodeon", "Standard legend; status 'The default colour legend could not be read'."]
+  automated:
+    - "gui: GuiTests::test_broken_default_file_falls_back"
+
+# ------------------------------------------------------------------------- SAFE
+- id: TC-SAFE-001
+  title: Unexpected error shows a dialog and keeps the text
+  reqs: [REQ-SAFE-001]
+  level: Integration
+  technique: Fault injection
+  priority: High
+  preconditions: Developer can raise an exception (e.g. via a debugger).
+  steps:
+    - ["Raise an exception inside a command", "Dialog 'Nodeon - unexpected error' with the details; the window stays open with the text."]
+  automated: []
+
+- id: TC-SAFE-002
+  title: Commands never change other text (regression invariant)
+  reqs: [REQ-SAFE-002]
+  level: System
+  technique: Invariant / property-based style over all structural commands
+  priority: High
+  preconditions: tree_b_example_project.txt open.
+  steps:
+    - ["Run each structural command on a line, then Ctrl+Z", "Text identical to before; after the command only the expected lines changed."]
+  automated: []
+
+# ------------------------------------------------------------------------- ITEM
+- id: TC-ITEM-001
+  title: "Panel shows the item at the cursor; hide / show is remembered"
+  reqs: [REQ-ITEM-001]
+  level: System
+  technique: "Use case"
+  priority: High
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Open a tree, cursor on 'Hammer'", "Panel on the right: 'Hammer', below it 'garage/ › Workbench/'."]
+    - ["Cursor on an empty line", "Panel says to put the cursor on an item."]
+    - ["View > Show item details off, restart", "Panel stays hidden; switching it on shows it again."]
+  automated:
+    - "gui: PanelBasicsTests::test_panel_is_on_the_right_and_visible"
+    - "gui: PanelBasicsTests::test_shows_name_and_path_of_the_row_at_the_cursor"
+    - "gui: PanelBasicsTests::test_spacer_line_shows_placeholder"
+    - "gui: PanelBasicsTests::test_toggle_panel_from_view_menu_is_remembered"
+    - "gui: PanelBasicsTests::test_panel_follows_cursor_moves_by_keyboard"
+
+- id: TC-ITEM-002
+  title: "Add pictures by drag & drop, browsing and pasting"
+  reqs: [REQ-ITEM-002]
+  level: System
+  technique: "Use case"
+  priority: High
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Drag two picture files from the file manager onto the picture area", "Both pictures are added; counter 1 / 2; title shows *."]
+    - ["'+ Add images…', select one file", "It is added and shown."]
+    - ["Copy a picture, click into the picture area, Ctrl+V", "The picture is added."]
+  automated:
+    - "gui: PictureTests::test_add_files_shows_first_added_and_counter"
+    - "gui: PictureTests::test_drag_and_drop_files_onto_picture_strip_and_panel"
+    - "gui: PictureTests::test_drop_image_data_from_a_browser"
+    - "gui: PictureTests::test_paste_picture_from_clipboard"
+
+- id: TC-ITEM-003
+  title: "Files that are not pictures are refused"
+  reqs: [REQ-ITEM-003]
+  level: System
+  technique: "Equivalence classes (text, fake picture, folder, missing file)"
+  priority: Medium
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Drop a .txt file and a text file renamed to .jpg", "Nothing is added; status bar names both files."]
+  automated:
+    - "gui: PictureTests::test_non_pictures_are_rejected_with_a_message"
+    - "gui: PictureTests::test_corrupt_picture_file_shows_message"
+
+- id: TC-ITEM-004
+  title: "Slideshow: previous / next, keys, thumbnails"
+  reqs: [REQ-ITEM-004]
+  level: System
+  technique: "Boundary values (first / last picture)"
+  priority: High
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Item with 3 pictures: click › three times", "1 / 3 → 2 / 3 → 3 / 3, stays at 3 / 3."]
+    - ["Click into the picture, press ←", "2 / 3."]
+    - ["Click the first thumbnail", "1 / 3."]
+  automated:
+    - "gui: PictureTests::test_slideshow_previous_next"
+    - "gui: PanelBasicsTests::test_empty_state"
+
+- id: TC-ITEM-005
+  title: "Zoom in / out / fit / 100 %"
+  reqs: [REQ-ITEM-005]
+  level: System
+  technique: "Boundary values (zoom limits)"
+  priority: Medium
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Big picture: + twice, − once, Fit", "Zoom changes by 25 % steps; Fit shows the whole picture."]
+    - ["Mouse wheel over the picture", "Zooms."]
+    - ["Drag the zoomed picture", "It moves."]
+  automated:
+    - "gui: PictureTests::test_zoom_in_out_fit_and_limits"
+    - "gui: PictureTests::test_mouse_wheel_zooms_picture"
+    - "gui: PictureTests::test_small_picture_is_not_enlarged_when_fitted"
+
+- id: TC-ITEM-006
+  title: "Large viewer window"
+  reqs: [REQ-ITEM-006]
+  level: System
+  technique: "Use case"
+  priority: Medium
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Double-click the picture", "A large window opens with the same picture and counter."]
+    - ["Next in the large window, then Close", "The panel shows the same picture."]
+  automated:
+    - "gui: PictureTests::test_open_large_viewer_navigation_syncs_panel"
+    - "gui: PictureTests::test_double_click_opens_viewer"
+
+- id: TC-ITEM-007
+  title: "Remove a picture after confirmation"
+  reqs: [REQ-ITEM-007]
+  level: System
+  technique: "Use case"
+  priority: High
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Remove, answer No", "Nothing removed."]
+    - ["Remove, answer Yes", "Only the shown picture is removed."]
+  automated:
+    - "gui: PictureTests::test_remove_picture_asks_and_can_be_cancelled"
+
+- id: TC-ITEM-008
+  title: "Change the order of pictures"
+  reqs: [REQ-ITEM-008]
+  level: System
+  technique: "Use case"
+  priority: Medium
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Picture 1 shown, click ▸", "Order 2, 1, 3; picture 1 stays shown."]
+    - ["Drag the third thumbnail to the front", "Order 3, …"]
+  automated:
+    - "gui: PictureTests::test_reorder_with_buttons"
+    - "gui: PictureTests::test_reorder_by_dragging_thumbnails"
+    - "gui: PictureTests::test_real_internal_move_in_the_strip"
+
+- id: TC-ITEM-009
+  title: "Must-have features and features to avoid"
+  reqs: [REQ-ITEM-009, REQ-ITEM-010, REQ-ITEM-016]
+  level: System
+  technique: "Use case"
+  priority: High
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Type two lines into 'Must-have features'", "Header (light green) shows · 2."]
+    - ["Type into 'Features to avoid'", "Header is light red."]
+    - ["Move to another item and back", "Each item shows its own features."]
+  automated:
+    - "gui: FeatureTests::test_features_are_stored_per_item"
+    - "gui: FeatureTests::test_typing_in_feature_box"
+    - "gui: FeatureTests::test_long_feature_lists_scroll"
+    - "gui: FeatureTests::test_clearing_features_forgets_the_item"
+    - "gui: PanelBasicsTests::test_section_titles_and_counts"
+    - "gui: PanelBasicsTests::test_dark_and_light_section_colours"
+
+- id: TC-ITEM-011
+  title: "Saved with the tree in <name>.txt.items/ and restored"
+  reqs: [REQ-ITEM-011]
+  level: System
+  technique: "Use case"
+  priority: High
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Add pictures and features, Ctrl+S", "garage.txt.items/items.json and images/ exist; the .txt has no extra content."]
+    - ["Close and reopen", "Pictures and features are back."]
+    - ["Change a picture and close", "Nodeon asks to save."]
+  automated:
+    - "gui: SaveLoadTests::test_save_and_reopen_restores_everything"
+    - "gui: SaveLoadTests::test_close_asks_to_save_after_picture_change"
+    - "gui: SaveLoadTests::test_nothing_written_for_a_tree_without_details"
+    - "gui: SaveLoadTests::test_untitled_tree_then_save_as"
+    - "gui: SaveLoadTests::test_open_other_file_switches_details"
+    - "gui: SaveLoadTests::test_crlf_and_bom_files_keep_details"
+    - "gui: ItemStoreTests::test_save_moves_staged_pictures_and_writes_db"
+
+- id: TC-ITEM-012
+  title: "Pictures and features stay with their row"
+  reqs: [REQ-ITEM-012]
+  level: System
+  technique: "State transitions, random testing with an oracle (Undo all)"
+  priority: High
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Give 'Saw' pictures and features; move it up twice, indent, rename other rows, Ctrl+Q its parent", "'Saw' keeps its pictures and features."]
+    - ["Ctrl+Z until the start", "The tree is as at the start and every item has its own data."]
+  automated:
+    - "gui: FollowTheRowTests::test_move_up_and_down"
+    - "gui: FollowTheRowTests::test_indent_and_outdent_change_the_level"
+    - "gui: FollowTheRowTests::test_rename_by_typing"
+    - "gui: FollowTheRowTests::test_delete_branch_and_undo"
+    - "gui: FollowTheRowTests::test_delete_line_keeps_children_details"
+    - "gui: FollowTheRowTests::test_undo_redo_of_moves"
+    - "gui: FollowTheRowTests::test_paste_lines"
+    - "gui: StressTests::test_random_structural_editing_keeps_every_item_with_its_row"
+    - "gui: StressTests::test_random_editing_then_undo_everything_restores_every_item"
+
+- id: TC-ITEM-013
+  title: "Discard, Save As, removed pictures are cleaned up"
+  reqs: [REQ-ITEM-013]
+  level: System
+  technique: "Use case, error guessing"
+  priority: High
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Add pictures, close with Discard", "The folder next to the tree is unchanged."]
+    - ["Save As to another folder", "Pictures copied; original folder complete."]
+    - ["Remove a picture and save", "Its file is deleted from images/."]
+  automated:
+    - "gui: SaveLoadTests::test_discard_leaves_folder_untouched"
+    - "gui: SaveLoadTests::test_save_as_copies_pictures_to_the_new_place"
+    - "gui: SaveLoadTests::test_removed_pictures_are_deleted_on_save"
+    - "gui: ItemStoreTests::test_garbage_collection_keeps_referenced_pictures"
+    - "gui: ItemStoreTests::test_discarded_pictures_never_reach_the_tree_folder"
+
+- id: TC-ITEM-014
+  title: "Damaged or missing item data"
+  reqs: [REQ-ITEM-014]
+  level: System
+  technique: "Error guessing, fault injection"
+  priority: High
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Delete one picture file in images/, reopen", "That picture shows 'missing'; no error."]
+    - ["Break items.json, reopen", "Warning; the tree is fine."]
+    - ["Save", "items.json.unreadable-… backup kept; no picture deleted."]
+  automated:
+    - "gui: SaveLoadTests::test_corrupt_database_warns_backs_up_and_keeps_pictures"
+    - "gui: SaveLoadTests::test_save_errors_are_reported_and_keep_unsaved_state"
+    - "gui: PictureTests::test_missing_picture_file_shows_message_not_crash"
+    - "gui: ItemStoreTests::test_unreadable_database_is_backed_up_and_pictures_never_deleted"
+
+- id: TC-ITEM-015
+  title: "Tree shortcuts do nothing while typing in the panel"
+  reqs: [REQ-ITEM-015]
+  level: System
+  technique: "Error guessing"
+  priority: High
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Type in a feature box, press Ctrl+D, Ctrl+Q, Alt+G", "Tree unchanged, nothing typed."]
+    - ["AltGr+2 (Swiss keyboard)", "'@' is typed."]
+    - ["Ctrl+S", "Saved."]
+  automated:
+    - "gui: FeatureTests::test_tree_shortcuts_do_not_fire_while_typing_in_the_panel"
+    - "gui: FeatureTests::test_command_keys_type_nothing_but_altgr_characters_do"
+    - "gui: FeatureTests::test_save_shortcut_still_works_from_the_panel"
+
+- id: TC-ITEM-017
+  title: "Large trees and many pictures"
+  reqs: [REQ-ITEM-017]
+  level: System
+  technique: "Load / stress testing"
+  priority: Medium
+  preconditions: "A tree open (e.g. the garage example); a few picture files."
+  steps:
+    - ["Tree with 2000 rows, 400 items with details: save, reopen", "Each under 10 s; all details back."]
+  automated:
+    - "gui: StressTests::test_large_tree_with_many_items_saves_and_loads_fast"
+    - "gui: StressTests::test_many_pictures_on_one_item"
+    - "gui: StressTests::test_rapid_switching_between_items"
+    - "gui: StressTests::test_repeated_save_reopen_cycles_are_stable"
+
+
+# ------------------------------------------------------------------------- TOOL (QMS tool validation)
+- id: TC-TOOL-001
+  title: Traceability report lists every requirement
+  reqs: [REQ-TOOL-001]
+  level: System
+  technique: Tool validation (ISO 13485 4.1.6)
+  priority: High
+  preconditions: Report generated (tools/generate_docs.py).
+  steps:
+    - ["Open reports/traceability.html in a browser", "One row per requirement in requirements.yaml."]
+  automated: []
+
+- id: TC-TOOL-002
+  title: Report filters by text and status
+  reqs: [REQ-TOOL-002]
+  level: System
+  technique: Tool validation
+  priority: Medium
+  preconditions: Report open.
+  steps:
+    - ["Type 'REQ-FOLD-003' into the filter", "Only that row is shown."]
+    - ["Choose status 'Failed'", "Only failed requirements (or the 'no rows' text)."]
+  automated: []
+
+- id: TC-TOOL-003
+  title: Report summary matches the rows
+  reqs: [REQ-TOOL-003]
+  level: System
+  technique: Tool validation
+  priority: High
+  preconditions: Report open.
+  steps:
+    - ["Count rows per status and compare with the summary tiles", "Numbers are equal."]
+  automated: []

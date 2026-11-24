@@ -1,0 +1,29 @@
+<testsuite name="06_legend.Colour legend" tests="2" errors="0" failures="0" skipped="0" time="0.232796" timestamp="2026-11-24T11:01:22.632765" hostname="vm"><testcase classname="06_legend.Colour legend" name="TC-LEG-001 The legend shows the standard meanings" status="passed" time="0.078392"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-LEG-001 The legend shows the standard meanings
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.078s
+    Then the legend shows "Not checked yet (only mentioned)" ... passed in 0.000s
+    And the legend shows "Accepted" ... passed in 0.000s
+    And the legend shows "To be approved" ... passed in 0.000s
+    And the legend shows "Rejected" ... passed in 0.000s
+    And the legend shows "Explanation" ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="06_legend.Colour legend" name="TC-LEG-002 Add an own colour and use its suggested shortcut" status="passed" time="0.154405"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-LEG-002 Add an own colour and use its suggested shortcut
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.088s
+    When I add the colour "Same on both robots" in the legend ... passed in 0.052s
+    Then the legend shows "Same on both robots" ... passed in 0.000s
+    When I put the cursor on "src/" ... passed in 0.006s
+    And I press "Alt+5" ... passed in 0.008s
+    Then the name "src/" is marked "Same on both robots" ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase></testsuite>

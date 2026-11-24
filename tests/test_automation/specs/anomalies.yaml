@@ -1,0 +1,84 @@
+# =============================================================================
+# Nodeon - anomaly (defect / observation) log found during verification
+# -----------------------------------------------------------------------------
+# In regulated development every deviation is recorded, assessed (severity,
+# risk), decided (fix now / later / accept) and closed with evidence.
+# Status values: Open -> Analysed -> Decided -> Fixed / Accepted -> Verified -> Closed
+# =============================================================================
+anomalies:
+  - id: ANOMALY-001
+    title: After adding or editing a colour in the legend, the editor has no keyboard focus
+    found_by: TC-LEG-002 (Behave + pytest-bdd run with the real colour dialog)
+    found_on: 2026-10-15
+    steps: >
+      1. Open a tree. 2. Legend > '+ Add colour', enter a meaning, OK.
+      3. Type a letter / press the new colour shortcut without clicking into the text.
+    expected: The cursor is back in the text editor, as before the dialog.
+    actual: >
+      No widget has the keyboard focus (the '+ Add colour' button that had it is
+      re-created when the legend is rebuilt). Typed text goes nowhere until the
+      user clicks into the editor; window shortcuts still work when the window
+      is active. No data is lost or changed.
+    severity: Low (usability)
+    risk: None for data integrity
+    proposal: Give the focus back to the editor after legend actions.
+    status: Open - waiting for decision (the product owner asked not to change the application in this task)
+  - id: ANOMALY-002
+    title: Duplicate + Delete of a branch with an empty line above leaves one extra empty line
+    found_by: TC-EDIT-003 (pytest system test)
+    found_on: 2026-10-15
+    steps: >
+      1. Open tree_a.txt (empty line 2 above 'src/'). 2. Cursor on 'src/', Ctrl+D.
+      3. Ctrl+Shift+Delete on the copy.
+    expected: Not specified by the requirements (REQ-EDIT-005 / REQ-EDIT-006).
+    actual: >
+      Ctrl+D copies the empty line above the branch together with the branch.
+      Deleting the copy keeps its empty line (delete never removes spacing), so
+      one '│' line more than before remains above 'docs/'.
+    severity: Low (cosmetic)
+    risk: None (no names or explanations change; Ctrl+Z restores)
+    proposal: Clarify the wanted behaviour (copy the empty line or not) and add it to REQ-EDIT-005.
+    status: Open - requirement clarification needed
+  - id: ANOMALY-003
+    title: Zoom of the item picture was reset whenever the tree text was re-read
+    found_by: PictureTests::test_zoom_in_out_fit_and_limits (developer GUI test, Nodeon 1.1.0 development)
+    found_on: 2026-10-30
+    steps: >
+      1. Item with a big picture. 2. Zoom in. 3. Wait for the editor to re-read the text
+      (e.g. after the cursor moves within the same item).
+    expected: The zoom stays as chosen.
+    actual: The picture was loaded again and fitted to the panel (zoom lost).
+    severity: Medium (usability)
+    risk: None for data integrity
+    proposal: Load the picture only when another picture is shown.
+    status: Closed - fixed in 1.1.0 and verified by TC-ITEM-005
+  - id: ANOMALY-004
+    title: Undo of "Delete line" or of a move to another place lost pictures of the affected rows
+    found_by: FollowTheRowTests + StressTests (random editing, Undo of everything, 6 seeds)
+    found_on: 2026-10-30
+    steps: >
+      1. Give the children of a branch pictures. 2. Ctrl+Q on the branch (children move up a level).
+      3. Ctrl+Z.
+    expected: The children have their pictures and features again.
+    actual: >
+      The rows came back but without their pictures, because the line-by-line comparison
+      could not match rows whose position and level changed at the same time. One redo
+      sequence even showed a neighbour's features on a row.
+    severity: High (data shown on the wrong row / not shown)
+    risk: High for data integrity before the fix (nothing was deleted from disk)
+    proposal: >
+      Remember which row key held which details for every text state seen; Undo / Redo return
+      to a known text and restore the exact assignment. Rows still unmatched are paired by their
+      own name when it is unique.
+    status: Closed - fixed in 1.1.0; verified by TC-ITEM-012 (also 40 seeds x 150 random steps)
+  - id: ANOMALY-005
+    title: Alt+letter typed the letter into a feature box
+    found_by: TC-ITEM-015 (pytest system test)
+    found_on: 2026-10-30
+    steps: "1. Click into 'Must-have features'. 2. Press Alt+G."
+    expected: Nothing happens (neither the colour command nor a typed letter).
+    actual: The letter 'g' was typed into the box (the tree was correctly not changed).
+    severity: Low
+    risk: None
+    proposal: Swallow command keys in the panel; keep editing keys and AltGr characters.
+    status: Closed - fixed in 1.1.0 and verified by TC-ITEM-015

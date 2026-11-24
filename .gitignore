@@ -1,0 +1,15 @@
+# Python cache (created automatically when the app runs)
+__pycache__/
+*.pyc
+
+# Build output (PyInstaller)
+build/
+dist/
+*.spec
+
+# test automation
+tests/test_automation/dotnet/**/bin/
+tests/test_automation/dotnet/**/obj/
+tests/test_automation/dotnet/**/TestResults/
+
+.idea

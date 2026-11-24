@@ -1,0 +1,93 @@
+<testsuite name="02_folding.Folding the tree" tests="7" errors="0" failures="0" skipped="0" time="0.663936" timestamp="2026-11-24T11:01:17.304237" hostname="vm"><testcase classname="02_folding.Folding the tree" name="TC-FOLD-001 Collapse all and expand all" status="passed" time="0.10854"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-FOLD-001 Collapse all and expand all
+    Given Nodeon is open with the test file "tree_b_example_project.txt" ... passed in 0.095s
+    When I press "Alt+1" ... passed in 0.006s
+    Then the level indicator shows 0 of 3 ... passed in 0.000s
+    When I press "Alt+4" ... passed in 0.007s
+    Then the level indicator shows 3 of 3 ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="02_folding.Folding the tree" name="TC-FOLD-002 Collapse and expand one level for the whole document" status="passed" time="0.113589"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-FOLD-002 Collapse and expand one level for the whole document
+    Given Nodeon is open with the test file "tree_b_example_project.txt" ... passed in 0.093s
+    When I press "Alt+2" ... passed in 0.007s
+    Then the level indicator shows 2 of 3 ... passed in 0.000s
+    When I press "Alt+2" ... passed in 0.006s
+    Then the level indicator shows 1 of 3 ... passed in 0.000s
+    When I press "Alt+3" ... passed in 0.007s
+    Then the level indicator shows 2 of 3 ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="02_folding.Folding the tree" name="TC-FOLD-003 Show exactly N levels with Ctrl+number -- @1.1 " status="passed" time="0.082144"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario Outline: TC-FOLD-003 Show exactly N levels with Ctrl+number -- @1.1 
+    Given Nodeon is open with the test file "tree_b_example_project.txt" ... passed in 0.076s
+    When I press "Ctrl+1" ... passed in 0.006s
+    Then the level indicator shows 1 of 3 ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="02_folding.Folding the tree" name="TC-FOLD-003 Show exactly N levels with Ctrl+number -- @1.2 " status="passed" time="0.090385"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario Outline: TC-FOLD-003 Show exactly N levels with Ctrl+number -- @1.2 
+    Given Nodeon is open with the test file "tree_b_example_project.txt" ... passed in 0.085s
+    When I press "Ctrl+2" ... passed in 0.006s
+    Then the level indicator shows 2 of 3 ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="02_folding.Folding the tree" name="TC-FOLD-003 Show exactly N levels with Ctrl+number -- @1.3 " status="passed" time="0.091804"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario Outline: TC-FOLD-003 Show exactly N levels with Ctrl+number -- @1.3 
+    Given Nodeon is open with the test file "tree_b_example_project.txt" ... passed in 0.086s
+    When I press "Ctrl+9" ... passed in 0.006s
+    Then the level indicator shows 3 of 3 ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="02_folding.Folding the tree" name="TC-FOLD-001 Collapse all leaves only the first line visible" status="passed" time="0.085331"><system-out>
+<![CDATA[
+@scenario.begin
+
+  @python_only
+  Scenario: TC-FOLD-001 Collapse all leaves only the first line visible
+    Given Nodeon is open with the test file "tree_b_example_project.txt" ... passed in 0.072s
+    When I press "Alt+1" ... passed in 0.006s
+    Then 1 lines are visible ... passed in 0.000s
+    When I press "Alt+4" ... passed in 0.007s
+    Then 66 lines are visible ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="02_folding.Folding the tree" name="TC-FOLD-005 Fold the branch at the cursor" status="passed" time="0.092144"><system-out>
+<![CDATA[
+@scenario.begin
+
+  @python_only
+  Scenario: TC-FOLD-005 Fold the branch at the cursor
+    Given Nodeon is open with the test file "tree_b_example_project.txt" ... passed in 0.072s
+    When I put the cursor on "assets/" ... passed in 0.006s
+    And I press "Ctrl+." ... passed in 0.007s
+    Then 56 lines are visible ... passed in 0.000s
+    When I press "Ctrl+." ... passed in 0.006s
+    Then 66 lines are visible ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase></testsuite>

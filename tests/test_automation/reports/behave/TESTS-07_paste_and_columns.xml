@@ -1,0 +1,64 @@
+<testsuite name="07_paste_and_columns.Pasting lines and column selection" tests="2" errors="0" failures="0" skipped="0" time="1.157439" timestamp="2026-11-24T11:01:23.822457" hostname="vm"><testcase classname="07_paste_and_columns.Pasting lines and column selection" name="TC-PASTE-001 Three pasted lines become three items on the same level" status="passed" time="0.417116"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-PASTE-001 Three pasted lines become three items on the same level
+    Given Nodeon is open with the tree: ... passed in 0.085s
+      """
+      root/
+      ├── a/
+      │   ├── a1
+      │   └── a2
+      └── b
+      """
+    When I put the cursor at the end of line 3 ... passed in 0.006s
+    And I press "Enter" ... passed in 0.007s
+    And I paste: ... passed in 0.018s
+      """
+      First requirement
+      
+      Second requirement
+      Third requirement
+      """
+    Then the tree is: ... passed in 0.300s
+      """
+      root/
+      ├── a/
+      │   ├── a1
+      │   ├── First requirement
+      │   ├── Second requirement
+      │   ├── Third requirement
+      │   └── a2
+      └── b
+      """
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="07_paste_and_columns.Pasting lines and column selection" name="TC-COL-002 Type on three lines at once in column mode" status="passed" time="0.740323"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-COL-002 Type on three lines at once in column mode
+    Given Nodeon is open with the tree: ... passed in 0.088s
+      """
+      root/
+      ├── alpha
+      ├── beta
+      └── gamma
+      """
+    When I put the cursor at the start of line 2 ... passed in 0.006s
+    And I press "Right" 4 times ... passed in 0.024s
+    And I press "Alt+Shift+Insert" ... passed in 0.007s
+    And I press "Shift+Down" 2 times ... passed in 0.013s
+    And I type "x_" ... passed in 0.302s
+    Then the tree is: ... passed in 0.301s
+      """
+      root/
+      ├── x_alpha
+      ├── x_beta
+      └── x_gamma
+      """
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase></testsuite>

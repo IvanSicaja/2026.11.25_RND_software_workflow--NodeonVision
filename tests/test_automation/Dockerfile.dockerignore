@@ -1,0 +1,6 @@
+# Used by: docker build -f tests/test_automation/Dockerfile .   (Docker reads <Dockerfile>.dockerignore)
+.git
+**/__pycache__
+tests/test_automation/reports
+tests/test_automation/dotnet/**/bin
+tests/test_automation/dotnet/**/obj

@@ -1,0 +1,57 @@
+<testsuite name="01_files_and_format.Files and tree format" tests="3" errors="0" failures="0" skipped="0" time="1.024311" timestamp="2026-11-24T11:01:16.546374" hostname="vm"><testcase classname="01_files_and_format.Files and tree format" name="TC-FMT-001 Opening and saving keeps the tree exactly" status="passed" time="0.180144"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-FMT-001 Opening and saving keeps the tree exactly
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.143s
+    When I save the tree ... passed in 0.037s
+    Then the saved file is: ... passed in 0.000s
+      """
+      project/
+      │
+      ├── src/                          ➡️ Source code
+      │   ├── main.py                   ➡️ Entry point
+      │   └── a_really_long_module_name.py   ➡️ Long one
+      ├── docs/                         ➡️ Documentation
+      │                                 ➡️ second line
+      └── README.md                     ➡️ Overview
+      """
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="01_files_and_format.Files and tree format" name="TC-FMT-003 A hash sign is ordinary text, not an explanation" status="passed" time="0.125631"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-FMT-003 A hash sign is ordinary text, not an explanation
+    Given Nodeon is open with the tree: ... passed in 0.096s
+      """
+      root/
+      └── src/   # note
+      """
+    When I save the tree ... passed in 0.028s
+    Then the saved file is: ... passed in 0.000s
+      """
+      root/
+      └── src/   # note
+      """
+    And the name "src/   # note" is marked "Not checked yet (only mentioned)" ... passed in 0.001s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="01_files_and_format.Files and tree format" name="TC-FILE-002 Saving writes the new item to the file" status="passed" time="0.718536"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-FILE-002 Saving writes the new item to the file
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.075s
+    When I put the cursor at the end of line 8 ... passed in 0.006s
+    And I press "Ctrl+Enter" ... passed in 0.006s
+    And I type "LICENSE" ... passed in 0.301s
+    And I save the tree ... passed in 0.028s
+    Then line 9 is "└── LICENSE" ... passed in 0.301s
+    And the saved file contains the line "└── LICENSE" ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase></testsuite>

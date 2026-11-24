@@ -1,0 +1,4763 @@
+#!/usr/bin/env python3
+"""
+Nodeon - a plain-.txt editor for box-drawing structure trees.
+
+    python main/main.py [file.txt]
+
+main.py (this file) is the Nodeon application; it needs treemodel.py next to it.
+
+The file on disk is always pure UTF-8 text in this format:
+
+    project-name/
+    │
+    ├── assets/                       # explanation
+    │   ├── 01_media/                 # explanation
+    │   └── 02_3d-modeling/           # explanation
+    └── README.md                     # explanation
+"""
+from __future__ import annotations
+
+import difflib
+import json
+import os
+import re
+import secrets
+import sys
+import traceback
+from typing import Callable, Dict, List, Optional, Set, Tuple
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
+
+from PySide6.QtCore import (QByteArray, QEvent, QIODevice, QPoint, QPointF, QRect, QRectF,
+                            QSaveFile, QSettings, QSize, QStandardPaths, Qt, QTimer, Signal)
+from PySide6.QtGui import (QAction, QColor, QFont, QFontDatabase, QFontMetrics, QFontMetricsF,
+                           QIcon, QPainterPath, QPen, QPixmap,
+                           QKeySequence, QPainter, QPalette, QPolygonF,
+                           QSyntaxHighlighter, QTextCharFormat, QTextCursor,
+                           QTextFormat)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
+                               QMenu, QStyle, QStyleOptionToolButton, QStylePainter,
+                               QColorDialog, QKeySequenceEdit, QLayout, QListWidget,
+                               QListWidgetItem, QPushButton, QSizePolicy,
+                               QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+                               QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
+                               QScrollArea, QSpinBox, QSplitter, QTextEdit, QToolBar,
+                               QToolButton,
+                               QVBoxLayout, QWidget)
+
+# --------------------------------------------------------------------------- #
+# Load treemodel.py - always the one next to this file
+# --------------------------------------------------------------------------- #
+REQUIRED_MODEL_NAMES = ("FormatOptions", "Node", "TreeDocument", "TreeError", "parse",
+                        "render", "format_text", "shift_comments", "insert_spacer",
+                        "node_after_subtree", "node_keys", "line_segments", "add_span",
+                        "subtract_range", "is_covered", "resolve_span", "word_at",
+                        "delete_row", "marker_at", "MARKER", "paste_lines",
+                        "looks_like_tree", "normalize_paste", "replace_columns")
+
+
+class ModelLoadError(Exception):
+    """treemodel.py is missing, empty, outdated or not Nodeon's file."""
+
+
+def load_treemodel(directory: str = APP_DIR):
+    """Import treemodel.py from `directory` (the folder of main.py).
+
+    Loading by path guarantees we never pick up another "treemodel" (a
+    folder or package with the same name elsewhere on the computer). The
+    file is checked, so a wrong file gives a clear message instead of a
+    crash deep inside the program."""
+    import importlib.util
+
+    if getattr(sys, "frozen", False):                 # packaged .exe (PyInstaller)
+        import treemodel as module
+        return module
+    path = os.path.join(directory, "treemodel.py")
+    if not os.path.isfile(path):
+        raise ModelLoadError(
+            f"The file treemodel.py was not found.\n\nExpected here:\n{path}\n\n"
+            "treemodel.py must be in the same folder as main.py.")
+    if os.path.getsize(path) == 0:
+        raise ModelLoadError(f"treemodel.py is empty (0 bytes):\n{path}\n\n"
+                             "Replace it with Nodeon's treemodel.py.")
+    if getattr(sys, "_nodeon_loading_model", False):
+        # treemodel.py itself started loading treemodel.py: it is a copy of main.py.
+        raise ModelLoadError(f"treemodel.py contains the code of main.py:\n{path}\n\n"
+                             "Replace it with Nodeon's treemodel.py.")
+    spec = importlib.util.spec_from_file_location("treemodel", path)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get("treemodel")
+    sys.modules["treemodel"] = module
+    sys._nodeon_loading_model = True
+    try:
+        spec.loader.exec_module(module)
+    except ModelLoadError:
+        if previous is not None:
+            sys.modules["treemodel"] = previous
+        else:
+            sys.modules.pop("treemodel", None)
+        raise
+    except Exception as ex:
+        if previous is not None:
+            sys.modules["treemodel"] = previous
+        else:
+            sys.modules.pop("treemodel", None)
+        raise ModelLoadError(f"treemodel.py could not be loaded:\n{path}\n\n"
+                             f"{type(ex).__name__}: {ex}") from ex
+    finally:
+        sys._nodeon_loading_model = False
+    missing = [n for n in REQUIRED_MODEL_NAMES if not hasattr(module, n)]
+    if missing:
+        if previous is not None:
+            sys.modules["treemodel"] = previous
+        else:
+            sys.modules.pop("treemodel", None)
+        raise ModelLoadError(
+            f"This treemodel.py is not Nodeon's file, or it is outdated:\n{path}\n\n"
+            f"Missing: {', '.join(missing)}\n\n"
+            "Replace it with the treemodel.py that belongs to this version of main.py.")
+    return module
+
+
+try:
+    tm = load_treemodel()
+    MODEL_ERROR: Optional[str] = None
+except ModelLoadError as _ex:
+    tm = None  # type: ignore[assignment]
+    MODEL_ERROR = str(_ex)
+
+# Pictures and feature lists of the items (right-hand panel) - itemdetails.py
+# must sit next to main.py, like treemodel.py.
+try:
+    import itemdetails as idt
+except ImportError as _ex:                                # pragma: no cover
+    idt = None  # type: ignore[assignment]
+    if MODEL_ERROR is None:
+        MODEL_ERROR = (f"The file itemdetails.py could not be loaded:\n"
+                       f"{os.path.join(APP_DIR, 'itemdetails.py')}\n\n{_ex}\n\n"
+                       "itemdetails.py must be in the same folder as main.py.")
+
+APP_NAME = "Nodeon"
+APP_VERSION = "1.1.0"
+COLLAPSED = 1                      # QTextBlock.userState() bit of a folded branch
+
+# Status marks for branch names (bits 1-8 of QTextBlock.userState(): 0 = none,
+# 1-3 = built-in colours, 8-255 = custom colours from the legend).
+MARK_NONE, MARK_CHECKED, MARK_EXPLORE, MARK_PROBLEM = 0, 1, 2, 3
+# Word colours can also be "default": shows the normal text colour even inside a
+# name that has a whole-line colour.
+MARK_DEFAULT = 4
+_MARK_BITS = 0xFF << 1
+
+
+def _state(block) -> int:
+    s = block.userState()
+    return 0 if s < 0 else s
+
+
+def is_collapsed(block) -> bool:
+    return bool(_state(block) & COLLAPSED)
+
+
+def set_collapsed(block, on: bool) -> None:
+    s = _state(block)
+    new = (s | COLLAPSED) if on else (s & ~COLLAPSED)
+    if new != s:
+        block.setUserState(new if new else -1)
+
+
+def mark_of(block) -> int:
+    return (_state(block) >> 1) & 0xFF
+
+
+def set_mark_bits(block, mark: int) -> bool:
+    s = _state(block)
+    new = (s & ~_MARK_BITS) | ((mark & 0xFF) << 1)
+    if new != s:
+        block.setUserState(new if new else -1)
+        return True
+    return False
+# --------------------------------------------------------------------------- #
+# Colour legend: what every colour means, its colour and its shortcuts
+# --------------------------------------------------------------------------- #
+LEGEND_TEXT_LABEL = "Not checked yet (only mentioned)"
+LEGEND_EXPLANATION_LABEL = "Explanation"
+BUILTIN_COLOURS = ((MARK_CHECKED, "checked", "Accepted"),
+                   (MARK_EXPLORE, "explore", "To be approved"),
+                   (MARK_PROBLEM, "problem", "Rejected"))
+# Standard shortcuts: (whole name, word / selection)
+STANDARD_KEYS = {"text": ("Alt+C", "Alt+Shift+C"),
+                 "checked": ("Alt+G", "Alt+Shift+G"),
+                 "explore": ("Alt+O", "Alt+Shift+O"),
+                 "problem": ("Alt+R", "Alt+Shift+R")}
+CUSTOM_KEY_DIGITS = "56789"            # suggested shortcuts for new own colours
+CUSTOM_FIRST_MARK = 8                  # mark ids 5-7 stay free, 4 = "default" word colour
+CUSTOM_LAST_MARK = 255
+CUSTOM_MAX = 200
+LABEL_MAX = 80
+# Suggested colours for new custom entries: readable on dark and light
+# backgrounds and clearly different from names, explanations and the 3 marks.
+SUGGESTED_COLOURS = ("#ec4899", "#0891b2", "#ca8a04", "#0d9488", "#d946ef", "#65a30d",
+                     "#a16207", "#be185d", "#0e7490", "#7c2d12")
+_HEX_COLOUR_RE = re.compile(r"#[0-9a-fA-F]{6}")
+_CUSTOM_KEY_RE = re.compile(r"c-[0-9a-f]{8}")
+DEFAULT_COLOURS_ENV = "NODEON_COLORS_FILE"
+
+
+def default_colours_path() -> str:
+    """File that holds the default colour legend (used for every new tree).
+
+    The environment variable NODEON_COLORS_FILE can point to another file,
+    e.g. a shared one for a whole team."""
+    env = os.environ.get(DEFAULT_COLOURS_ENV, "").strip()
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
+    if not base:
+        base = os.path.join(os.path.expanduser("~"), ".nodeon")
+    return os.path.join(base, "nodeon_colours.json")
+
+
+def normalize_keys(text) -> str:
+    """One key combination in portable form ("Alt+G"), or "" when empty / invalid."""
+    if isinstance(text, QKeySequence):
+        seq = text
+    elif isinstance(text, str) and text.strip():
+        seq = QKeySequence.fromString(text.strip(), QKeySequence.SequenceFormat.PortableText)
+    else:
+        return ""
+    if seq.count() != 1:
+        return ""
+    combo = seq[0]
+    if combo.key() in (Qt.Key.Key_unknown, Qt.Key.Key_Control, Qt.Key.Key_Shift,
+                       Qt.Key.Key_Alt, Qt.Key.Key_Meta, Qt.Key.Key_AltGr):
+        return ""
+    return QKeySequence(combo).toString(QKeySequence.SequenceFormat.PortableText)
+
+
+def keys_problem(portable: str) -> Optional[str]:
+    """Why a key combination can't be used for a colour (None = fine)."""
+    if not portable:
+        return None
+    combo = QKeySequence.fromString(portable, QKeySequence.SequenceFormat.PortableText)[0]
+    mods = combo.keyboardModifiers()
+    key = combo.key()
+    is_f_key = Qt.Key.Key_F1.value <= key.value <= Qt.Key.Key_F35.value
+    needs = (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+             | Qt.KeyboardModifier.MetaModifier)
+    if not (mods & needs) and not is_f_key:
+        return (f"“{native_keys(portable)}” would be typed as text - use Ctrl, Alt or an "
+                "F-key in the combination.")
+    return None
+
+
+def native_keys(portable: str) -> str:
+    """Key combination as the person sees it on this computer."""
+    if not portable:
+        return ""
+    return QKeySequence.fromString(portable, QKeySequence.SequenceFormat.PortableText).toString(
+        QKeySequence.SequenceFormat.NativeText)
+
+
+def compact_keys(keys: List[str]) -> str:
+    """["Alt+G", "Alt+O", "Alt+C"] -> "Alt+G/O/C" (for the toolbar caption)."""
+    keys = [native_keys(k) for k in keys if k]
+    if not keys:
+        return "no shortcuts"
+    split = [k.rsplit("+", 1) if "+" in k[1:] else ["", k] for k in keys]
+    prefixes = {p for p, _ in split}
+    if len(prefixes) == 1 and all(len(last) <= 3 for _, last in split):
+        prefix = prefixes.pop()
+        return (prefix + "+" if prefix else "") + "/".join(last for _, last in split)
+    return " ".join(keys[:2]) + (" …" if len(keys) > 2 else "")
+
+
+# Keys colour shortcuts must not take (the editor or the menus need them).
+EDITOR_RESERVED_KEYS = {
+    "Ctrl+C": "Copy", "Ctrl+X": "Cut", "Ctrl+V": "Paste", "Ctrl+A": "Select all",
+    "Ctrl+Ins": "Copy", "Shift+Ins": "Paste", "Shift+Del": "Cut",
+    "Ctrl+Left": "Move by word", "Ctrl+Right": "Move by word",
+    "Ctrl+Shift+Left": "Select by word", "Ctrl+Shift+Right": "Select by word",
+    "Ctrl+Up": "Scroll", "Ctrl+Down": "Scroll", "Ctrl+Home": "Start of the tree",
+    "Ctrl+End": "End of the tree", "Ctrl+Shift+Home": "Select to the start",
+    "Ctrl+Shift+End": "Select to the end", "Ctrl+Backspace": "Delete word",
+    "Ctrl+Del": "Delete word", "Alt+F4": "Close the window", "Ctrl+Tab": "Switch focus",
+    "Alt+F": "the File menu", "Alt+E": "the Edit menu", "Alt+T": "the Tree menu",
+    "Alt+V": "the View menu", "Alt+H": "the Help menu", "Esc": "Escape",
+}
+
+
+class ColourEntry:
+    """One colour of the legend (built-in or own). For built-in colours,
+    color None means "standard colour" (it follows the light / dark theme)."""
+    __slots__ = ("key", "label", "color", "mark", "builtin", "line_key", "word_key")
+
+    def __init__(self, key: str, label: str, color: Optional[str], mark: int,
+                 builtin: bool = False, line_key: str = "", word_key: str = "") -> None:
+        self.key, self.label, self.color, self.mark = key, label, color, mark
+        self.builtin, self.line_key, self.word_key = builtin, line_key, word_key
+
+    def copy(self) -> "ColourEntry":
+        return ColourEntry(self.key, self.label, self.color, self.mark, self.builtin,
+                           self.line_key, self.word_key)
+
+    def __repr__(self) -> str:
+        return f"ColourEntry({self.key!r}, {self.label!r}, {self.color!r}, mark={self.mark})"
+
+
+def _clean_label(value, fallback: str = "") -> str:
+    text = " ".join(str(value).split()) if isinstance(value, str) else ""
+    return text[:LABEL_MAX] or fallback
+
+
+def _clean_colour(value) -> Optional[str]:
+    return value.lower() if isinstance(value, str) and _HEX_COLOUR_RE.fullmatch(value) else None
+
+
+class Palette:
+    """The colour legend of one tree: the default text colour, the built-in
+    colours, own colours and the explanation colour - each with its meaning,
+    colour and shortcuts."""
+
+    def __init__(self) -> None:
+        self.text_label = LEGEND_TEXT_LABEL
+        self.explanation_label = LEGEND_EXPLANATION_LABEL
+        self.text_color: Optional[str] = None            # None = standard (theme)
+        self.explanation_color: Optional[str] = None
+        self.text_line_key, self.text_word_key = STANDARD_KEYS["text"]
+        self.entries: List[ColourEntry] = [
+            ColourEntry(key, label, None, mark, True, *STANDARD_KEYS[key])
+            for mark, key, label in BUILTIN_COLOURS]
+
+    # -- lookup ----------------------------------------------------------
+    @classmethod
+    def factory(cls) -> "Palette":
+        return cls()
+
+    def copy(self) -> "Palette":
+        p = Palette()
+        for attr in ("text_label", "explanation_label", "text_color", "explanation_color",
+                     "text_line_key", "text_word_key"):
+            setattr(p, attr, getattr(self, attr))
+        p.entries = [e.copy() for e in self.entries]
+        return p
+
+    def customs(self) -> List[ColourEntry]:
+        return [e for e in self.entries if not e.builtin]
+
+    def by_key(self, key: str) -> Optional[ColourEntry]:
+        return next((e for e in self.entries if e.key == key), None)
+
+    def by_mark(self, mark: int) -> Optional[ColourEntry]:
+        return next((e for e in self.entries if e.mark == mark), None)
+
+    def has_mark(self, mark: int) -> bool:
+        return self.by_mark(mark) is not None
+
+    def label(self, mark: int) -> str:
+        e = self.by_mark(mark)
+        return e.label if e else ""
+
+    def colour(self, mark: int, theme) -> Optional[str]:
+        e = self.by_mark(mark)
+        if e is None:
+            return None
+        if e.color is not None:
+            return e.color
+        return {MARK_CHECKED: theme.mark_checked, MARK_EXPLORE: theme.mark_explore,
+                MARK_PROBLEM: theme.mark_problem}[e.mark]
+
+    def text_colour(self, theme) -> str:
+        return self.text_color or theme.file
+
+    def explanation_colour(self, theme) -> str:
+        return self.explanation_color or theme.comment
+
+    def overrides(self) -> Tuple[Optional[str], Optional[str], Dict[int, str]]:
+        """(text colour, explanation colour, {mark: colour}) set in the legend;
+        None / missing = the theme's standard colour."""
+        return (self.text_color, self.explanation_color,
+                {e.mark: e.color for e in self.entries if e.color is not None})
+
+    def row_keys(self, row: str) -> Tuple[str, str]:
+        """(whole name, word) shortcuts of a legend row ("text" or a colour key)."""
+        if row == "text":
+            return self.text_line_key, self.text_word_key
+        e = self.by_key(row)
+        return (e.line_key, e.word_key) if e else ("", "")
+
+    def keys_in_use(self, exclude: Optional[str] = None) -> Dict[str, str]:
+        """{portable key combination: what it does} for all colour shortcuts,
+        except those of the row `exclude`."""
+        used: Dict[str, str] = {}
+        rows = [("text", self.text_label)] + [(e.key, e.label) for e in self.entries]
+        for row, label in rows:
+            if row == exclude:
+                continue
+            line, word = self.row_keys(row)
+            if line:
+                used[line] = f"Colour line: {label}"
+            if word:
+                used[word] = f"Colour word / selection: {label}"
+        return used
+
+    def suggest_keys(self, taken=()) -> Tuple[str, str]:
+        """Free shortcuts for a new own colour: Alt+5 / Alt+Shift+5 ... Alt+9."""
+        used = set(self.keys_in_use()) | set(taken)
+        for d in CUSTOM_KEY_DIGITS:
+            line, word = normalize_keys(f"Alt+{d}"), normalize_keys(f"Alt+Shift+{d}")
+            if line not in used and word not in used:
+                return line, word
+        return "", ""
+
+    # -- changes ---------------------------------------------------------
+    def _free_mark(self) -> int:
+        used = {e.mark for e in self.entries}
+        for m in range(CUSTOM_FIRST_MARK, CUSTOM_LAST_MARK + 1):
+            if m not in used:
+                return m
+        raise ValueError("No more colours can be added")
+
+    def _new_key(self) -> str:
+        while True:
+            key = "c-" + secrets.token_hex(4)
+            if self.by_key(key) is None:
+                return key
+
+    def add_custom(self, label: str, color: str, line_key: Optional[str] = None,
+                   word_key: Optional[str] = None) -> ColourEntry:
+        """Add an own colour. Shortcuts None = suggest free ones, "" = none."""
+        if len(self.customs()) >= CUSTOM_MAX:
+            raise ValueError(f"The legend can hold at most {CUSTOM_MAX} own colours")
+        if not _HEX_COLOUR_RE.fullmatch(color or ""):
+            raise ValueError(f"Not a colour: {color!r}")
+        if line_key is None or word_key is None:
+            sl, sw = self.suggest_keys()
+            line_key = sl if line_key is None else line_key
+            word_key = sw if word_key is None else word_key
+        used = self.keys_in_use()
+        line_key, word_key = normalize_keys(line_key), normalize_keys(word_key)
+        entry = ColourEntry(self._new_key(), _clean_label(label, "Custom colour"),
+                            color.lower(), self._free_mark(), False,
+                            "" if line_key in used else line_key,
+                            "" if word_key in used or word_key == line_key else word_key)
+        self.entries.append(entry)
+        return entry
+
+    def remove(self, key: str) -> ColourEntry:
+        e = self.by_key(key)
+        if e is None or e.builtin:
+            raise ValueError("Built-in colours can't be removed - change their meaning instead")
+        self.entries.remove(e)
+        return e
+
+    def suggest_colour(self) -> str:
+        used = {e.color for e in self.customs()}
+        for c in SUGGESTED_COLOURS:
+            if c not in used:
+                return c
+        hue = (len(used) * 137) % 360                  # golden angle: well spread
+        return QColor.fromHsv(hue, 200, 190).name()
+
+    def merge(self, other: "Palette") -> List[ColourEntry]:
+        """Add the own colours of `other` that this legend does not have yet
+        (their shortcuts only if still free)."""
+        added = []
+        for e in other.customs():
+            if self.by_key(e.key) is None and len(self.customs()) < CUSTOM_MAX:
+                used = self.keys_in_use()
+                ne = ColourEntry(e.key, e.label, e.color, self._free_mark(), False,
+                                 "" if e.line_key in used else e.line_key,
+                                 "" if e.word_key in used else e.word_key)
+                self.entries.append(ne)
+                added.append(ne)
+        return added
+
+    # -- files -------------------------------------------------------------
+    def to_json(self) -> dict:
+        colours = []
+        for e in self.entries:
+            item = {"key": e.key, "label": e.label}
+            if e.color is not None:
+                item["color"] = e.color
+            item["line_key"], item["word_key"] = e.line_key, e.word_key
+            colours.append(item)
+        data = {"text": self.text_label, "explanation": self.explanation_label,
+                "text_line_key": self.text_line_key, "text_word_key": self.text_word_key}
+        if self.text_color:
+            data["text_color"] = self.text_color
+        if self.explanation_color:
+            data["explanation_color"] = self.explanation_color
+        data["colours"] = colours
+        return data
+
+    def same_as(self, other: "Palette") -> bool:
+        return self.to_json() == other.to_json()
+
+    @classmethod
+    def from_json(cls, data) -> "Palette":
+        """Build a legend from file data. Invalid parts are skipped; the three
+        built-in colours always exist. Files of older versions (no shortcuts,
+        "slot" numbers) are understood."""
+        p = cls()
+        if not isinstance(data, dict):
+            raise ValueError("The colour legend is not a JSON object")
+        p.text_label = _clean_label(data.get("text"), LEGEND_TEXT_LABEL)
+        p.explanation_label = _clean_label(data.get("explanation"), LEGEND_EXPLANATION_LABEL)
+        p.text_color = _clean_colour(data.get("text_color"))
+        p.explanation_color = _clean_colour(data.get("explanation_color"))
+        if "text_line_key" in data:
+            p.text_line_key = normalize_keys(data.get("text_line_key"))
+        if "text_word_key" in data:
+            p.text_word_key = normalize_keys(data.get("text_word_key"))
+        items = data.get("colours", [])
+        if not isinstance(items, list):
+            raise ValueError("'colours' must be a list")
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key")
+            builtin = p.by_key(key) if isinstance(key, str) else None
+            if builtin is not None and builtin.builtin:
+                builtin.label = _clean_label(item.get("label"), builtin.label)
+                builtin.color = _clean_colour(item.get("color"))
+                if "line_key" in item:
+                    builtin.line_key = normalize_keys(item.get("line_key"))
+                if "word_key" in item:
+                    builtin.word_key = normalize_keys(item.get("word_key"))
+                continue
+            color = _clean_colour(item.get("color"))
+            if not (isinstance(key, str) and _CUSTOM_KEY_RE.fullmatch(key) and color
+                    and p.by_key(key) is None and len(p.customs()) < CUSTOM_MAX):
+                continue
+            label = _clean_label(item.get("label"))
+            if not label:
+                continue
+            if "line_key" in item or "word_key" in item:
+                line, word = normalize_keys(item.get("line_key")), normalize_keys(item.get("word_key"))
+            else:                                         # older file: "slot" 5-9
+                slot = item.get("slot")
+                ok = isinstance(slot, int) and str(slot) in CUSTOM_KEY_DIGITS
+                line = normalize_keys(f"Alt+{slot}") if ok else ""
+                word = normalize_keys(f"Alt+Shift+{slot}") if ok else ""
+            e = ColourEntry(key, label, color, p._free_mark(), False, line, word)
+            p.entries.append(e)
+        p._dedupe_keys()
+        return p
+
+    def _dedupe_keys(self) -> None:
+        """The same key combination may only be used once (first one wins)."""
+        seen: Set[str] = set()
+
+        def keep(k: str) -> str:
+            if not k or k in seen:
+                return ""
+            seen.add(k)
+            return k
+        self.text_line_key, self.text_word_key = keep(self.text_line_key), keep(self.text_word_key)
+        for e in self.entries:
+            e.line_key, e.word_key = keep(e.line_key), keep(e.word_key)
+
+
+NEW_DOCUMENT = "new-project/\n│\n└── "
+# Shortcut for "Edit name & explanation". Change it here if you prefer another one.
+EDIT_SHORTCUT = "Ctrl+Shift+E"
+DEFAULT_FONT_SIZE = 12.0           # editor font size (pt)
+UI_VERSION = 2                     # bump to re-apply first-start layout defaults
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+def u16len(s: str) -> int:
+    """Qt positions count UTF-16 code units, Python counts code points."""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def u16_to_cp(s: str, u: int) -> int:
+    return len(s.encode("utf-16-le")[: 2 * u].decode("utf-16-le", errors="ignore"))
+
+
+def monospace_font(size: float) -> QFont:
+    families = set(QFontDatabase.families())
+    for fam in ("JetBrains Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono",
+                "Menlo", "SF Mono", "Liberation Mono", "Courier New"):
+        if fam in families:
+            font = QFont(fam)
+            break
+    else:
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    font.setStyleHint(QFont.StyleHint.Monospace)
+    font.setFixedPitch(True)
+    font.setPointSizeF(size)
+    return font
+
+
+class Theme:
+    def __init__(self, dark: bool) -> None:
+        self.dark = dark
+        if dark:
+            self.bg, self.fg = "#1e1f22", "#c9ccd3"
+            self.gutter_bg, self.gutter_fg, self.gutter_cur = "#1e1f22", "#4e525a", "#a9acb4"
+            self.guide, self.comment = "#5a5e66", "#a78bfa"      # violet-400
+            # Status marks (Tailwind 400): checked / to explore / problem
+            self.mark_checked, self.mark_explore, self.mark_problem = "#34d399", "#fb923c", "#f87171"
+            self.folder, self.file = "#6aaef0", "#c9ccd3"
+            self.current_line, self.fold = "#26282e", "#9da0a8"
+            self.badge_bg, self.badge_fg = "#3a3d44", "#c9ccd3"
+            self.selection = "#214283"
+        else:
+            self.bg, self.fg = "#ffffff", "#1f2328"
+            self.gutter_bg, self.gutter_fg, self.gutter_cur = "#f6f7f9", "#a4a9b1", "#3b4048"
+            self.guide, self.comment = "#9ca2ab", "#7c3aed"      # violet-600
+            # Status marks (Tailwind 500): checked / to explore / problem
+            self.mark_checked, self.mark_explore, self.mark_problem = "#10b981", "#f97316", "#ef4444"
+            self.folder, self.file = "#1d5fbf", "#1f2328"
+            self.current_line, self.fold = "#f3f6fb", "#6c717a"
+            self.badge_bg, self.badge_fg = "#e5e9f0", "#3b4048"
+            self.selection = "#bcd4f5"
+
+
+def apply_app_palette(app: QApplication, dark: bool) -> None:
+    app.setStyle("Fusion")
+    if not dark:
+        app.setPalette(app.style().standardPalette())
+        return
+    p = QPalette()
+    roles = {
+        QPalette.ColorRole.Window: "#2b2d30", QPalette.ColorRole.WindowText: "#dfe1e5",
+        QPalette.ColorRole.Base: "#1e1f22", QPalette.ColorRole.AlternateBase: "#2b2d30",
+        QPalette.ColorRole.ToolTipBase: "#2b2d30", QPalette.ColorRole.ToolTipText: "#dfe1e5",
+        QPalette.ColorRole.Text: "#dfe1e5", QPalette.ColorRole.Button: "#2b2d30",
+        QPalette.ColorRole.ButtonText: "#dfe1e5", QPalette.ColorRole.BrightText: "#ffffff",
+        QPalette.ColorRole.Highlight: "#2f65ca", QPalette.ColorRole.HighlightedText: "#ffffff",
+        QPalette.ColorRole.PlaceholderText: "#7b7e85", QPalette.ColorRole.Link: "#6aaef0",
+    }
+    for role, color in roles.items():
+        p.setColor(role, QColor(color))
+    for role in (QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText,
+                 QPalette.ColorRole.WindowText):
+        p.setColor(QPalette.ColorGroup.Disabled, role, QColor("#6f737a"))
+    app.setPalette(p)
+
+
+# --------------------------------------------------------------------------- #
+# Syntax highlighting
+# --------------------------------------------------------------------------- #
+class TreeHighlighter(QSyntaxHighlighter):
+    _CONN = re.compile(r"├──|└──|\|--|`--|\+--")
+    _HASH = re.compile(r"\s\u27a1\ufe0f?")              # explanation marker ➡️ only
+
+    def __init__(self, document, theme: Theme) -> None:
+        super().__init__(document)
+        # Returns [(start, end, mark, bold)] of coloured words for a line number.
+        self.span_provider: Callable[[int], list] = lambda line: ()
+        # Colours set in the legend: (text, explanation, {mark: colour}).
+        self.overrides: Tuple[Optional[str], Optional[str], Dict[int, str]] = (None, None, {})
+        self.set_theme(theme, rehighlight=False)
+
+    def set_theme(self, theme: Theme, rehighlight: bool = True) -> None:
+        def fmt(color: str, bold: bool = False, italic: bool = False) -> QTextCharFormat:
+            f = QTextCharFormat()
+            f.setForeground(QColor(color))
+            if bold:
+                f.setFontWeight(QFont.Weight.DemiBold)
+            f.setFontItalic(italic)
+            return f
+        self.f_guide = fmt(theme.guide)
+        self.f_folder = fmt(theme.folder, bold=True)
+        self._fmt = fmt
+        self._theme = theme
+        self._build_mark_formats()
+        if rehighlight:
+            self.rehighlight()
+
+    def _build_mark_formats(self) -> None:
+        theme = self._theme
+        text, explanation, marks = self.overrides
+        self.f_comment = self._fmt(explanation or theme.comment)
+        self.f_file = self._fmt(text or theme.file)
+        self.mark_colors = {MARK_CHECKED: theme.mark_checked, MARK_EXPLORE: theme.mark_explore,
+                            MARK_PROBLEM: theme.mark_problem, **marks}
+        self.f_marks = {(m, bold): self._fmt(c, bold=bold)
+                        for m, c in self.mark_colors.items() for bold in (False, True)}
+
+    def set_overrides(self, text: Optional[str], explanation: Optional[str],
+                      marks: Dict[int, str]) -> None:
+        new = (text, explanation, dict(marks))
+        if new != self.overrides:
+            self.overrides = new
+            self._build_mark_formats()
+            self.rehighlight()
+
+    def highlightBlock(self, text: str) -> None:
+        # Keep the fold flag that the editor stores in the block state.
+        self.setCurrentBlockState(self.currentBlock().userState())
+        n = len(text)
+        i = 0
+        while i < n and text[i] in "│| \t\xa0" and not self._CONN.match(text, i):
+            i += 1
+        m = self._CONN.match(text, i)
+        if m:
+            i = m.end()
+        if i:
+            self.setFormat(0, i, self.f_guide)
+        rest = text[i:]
+        stripped = rest.lstrip()
+        if stripped[:1] == "\u27a1":
+            self.setFormat(i + len(rest) - len(stripped), n, self.f_comment)
+            return                                   # explanations: always their own colour
+        hm = self._HASH.search(rest)
+        c = i + hm.start() + 1 if hm else n
+        name = text[i:c].strip()
+        if name:
+            start = text.index(name, i)
+            folder = name.endswith(("/", "\\"))
+            mark = mark_of(self.currentBlock())
+            normal = self.f_folder if folder else self.f_file
+            fmt = self.f_marks.get((mark, folder), normal) if mark else normal
+            self.setFormat(start, len(name), fmt)
+        self._paint_spans(n)                          # coloured words (names only)
+        if hm:
+            self.setFormat(c, n - c, self.f_comment)   # explanation colour always wins
+
+    def _paint_spans(self, n: int) -> None:
+        for start, end, mark, bold in self.span_provider(self.currentBlock().blockNumber()):
+            start, end = max(0, start), min(n, end)
+            if end > start:
+                normal = self.f_folder if bold else self.f_file
+                fmt = normal if mark == MARK_DEFAULT else self.f_marks.get((mark, bold), normal)
+                self.setFormat(start, end - start, fmt)
+
+
+# --------------------------------------------------------------------------- #
+# Editor with fold gutter
+# --------------------------------------------------------------------------- #
+class FoldGutter(QWidget):
+    def __init__(self, editor: "TreeEditor") -> None:
+        super().__init__(editor)
+        self.editor = editor
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def sizeHint(self) -> QSize:
+        return QSize(self.editor.gutter_width(), 0)
+
+    def paintEvent(self, event) -> None:
+        self.editor.paint_gutter(event)
+
+    def mousePressEvent(self, event) -> None:
+        self.editor.gutter_clicked(event)
+
+
+class TreeEditor(QPlainTextEdit):
+    statusMessage = Signal(str)
+    foldsChanged = Signal()
+    marksChanged = Signal()
+    columnModeChanged = Signal(bool)
+    openFileRequested = Signal(str)
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.options = tm.FormatOptions()
+        self.theme = Theme(False)
+        self._model, self._map = tm.parse("")
+        self._ranges: dict = {}
+        self._parsed_rev = -1
+        self._last_block = 0
+        self._reserved_keys: Set[int] = set()
+        # Status marks by node key; the line states are the live copy, this
+        # registry restores marks after Undo and is what gets saved.
+        self.marks: Dict[tm.NodeKey, int] = {}
+        self.colours = Palette.factory()           # colour legend of this tree
+        self._join_next_edit = False
+        self._in_drop = False
+        # Column (block) selection: [anchor line, anchor col, line, col] in
+        # characters; columns may lie beyond the end of a line (virtual space).
+        self._col_mode = False
+        self._blk: Optional[List[int]] = None
+        self._blk_rev = -1
+        self._blk_internal = False
+        self._blk_drag = False
+        # Coloured words: node key -> spans (see treemodel.Span).
+        self.spans: Dict[tm.NodeKey, List[tm.Span]] = {}
+        # Pictures and features of the items (itemdetails.ItemDetails) by node
+        # key - follows the rows exactly like the colour marks do.
+        self.details: Dict[tm.NodeKey, "idt.ItemDetails"] = {}
+        # Which key held which details in every text state seen (by the
+        # text's fingerprint): Undo / Redo return to a known text, so the
+        # pictures go back to exactly the rows they belonged to.
+        self._details_states: Dict[Tuple[int, int], Dict[tm.NodeKey, "idt.ItemDetails"]] = {}
+        self._state_id: Tuple[int, int] = (0, hash(""))
+        self._visible_spans: Dict[tm.NodeKey, List[tm.Span]] = {}
+        self._line_spans: Dict[int, List[Tuple[int, int, int, bool]]] = {}
+        self._line_keys: List[Optional[tm.NodeKey]] = []
+        self.context_actions: List[Optional[QAction]] = []
+
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.setFrameShape(QPlainTextEdit.Shape.NoFrame)
+        self.gutter = FoldGutter(self)
+        self.highlighter = TreeHighlighter(self.document(), self.theme)
+        self.highlighter.span_provider = lambda line: self._line_spans.get(line, ())
+        self.set_font_size(DEFAULT_FONT_SIZE)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(200)
+        self._timer.timeout.connect(self.refresh)
+
+        self.blockCountChanged.connect(self._update_gutter_width)
+        self.updateRequest.connect(self._on_update_request)
+        self.cursorPositionChanged.connect(self._on_cursor_moved)
+        self.document().contentsChanged.connect(self._timer.start)
+        self.document().contentsChanged.connect(self._block_check_edit)
+        self._update_gutter_width()
+        self._highlight_current_line()
+
+    # ---- appearance ------------------------------------------------------
+    def set_theme(self, theme: Theme) -> None:
+        self.theme = theme
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Base, QColor(theme.bg))
+        pal.setColor(QPalette.ColorRole.Text, QColor(theme.fg))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor(theme.selection))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor(theme.fg))
+        self.setPalette(pal)
+        self._recolour(lambda: self.highlighter.set_theme(theme))
+        self._highlight_current_line()
+        self.gutter.update()
+        self.viewport().update()
+
+    def set_font_size(self, size: float) -> None:
+        size = max(6.0, min(48.0, size))
+        font = monospace_font(size)
+        self.setFont(font)
+        self.gutter.setFont(font)
+        self.setTabStopDistance(QFontMetricsF(font).horizontalAdvance(" ") * tm.INDENT)
+        self._update_gutter_width()
+
+    def font_size(self) -> float:
+        return self.font().pointSizeF()
+
+    def wheelEvent(self, e) -> None:
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            step = 1 if e.angleDelta().y() > 0 else -1
+            self.set_font_size(self.font_size() + step)
+            e.accept()
+            return
+        super().wheelEvent(e)
+
+    # ---- document ----------------------------------------------------------
+    def set_document_text(self, text: str) -> None:
+        self._blk = None
+        self.marks = {}
+        self.spans = {}
+        self.details = {}
+        self._details_states = {}
+        self._state_id = (len(text), hash(text))
+        self._visible_spans = {}
+        self._line_spans = {}
+        self._line_keys = []
+        self.setPlainText(text)
+        self.document().clearUndoRedoStacks()
+        self.refresh(force=True)
+        self.moveCursor(QTextCursor.MoveOperation.Start)
+        self.document().setModified(False)
+
+    def reserve_shortcuts(self, actions) -> None:
+        """Make sure our shortcuts win over QPlainTextEdit's built-in keys."""
+        for a in actions:
+            for seq in a.shortcuts():
+                if not seq.isEmpty():
+                    self._reserved_keys.add(seq[0].toCombined())
+
+    def event(self, e) -> bool:
+        if e.type() == QEvent.Type.ShortcutOverride:
+            if e.keyCombination().toCombined() in self._reserved_keys:
+                e.ignore()
+                return True
+        return super().event(e)
+
+    # ---- parsing and folding ---------------------------------------------
+    def _rev_ok(self) -> bool:
+        return self.document().revision() == self._parsed_rev
+
+    def refresh(self, force: bool = False) -> None:
+        if force or not self._rev_ok():
+            old_keys = self._line_keys
+            self._remember_details_state()
+            text = self.toPlainText()
+            self._model, self._map = tm.parse(text)
+            self._ranges = self._map.fold_ranges()
+            self._parsed_rev = self.document().revision()
+            new_keys = self._compute_line_keys()
+            if len(old_keys) == len(new_keys):
+                # Same lines, some names typed differently: keep their colours.
+                old_set, new_set = set(old_keys), set(new_keys)
+                self._migrate_keys([(o, n) for o, n in zip(old_keys, new_keys)
+                                    if o is not None and n is not None and o != n
+                                    and o not in new_set and n not in old_set])
+            if self.details and old_keys and old_keys != new_keys:
+                # Pictures / features also follow rows that moved elsewhere.
+                self._migrate_details_aligned(old_keys, new_keys)
+            self._state_id = (len(text), hash(text))
+            known = self._details_states.get(self._state_id)
+            if known is not None:
+                self._restore_details_state(known)
+            self._remember_details_state()
+            self._line_keys = new_keys
+            self._apply_folds()
+            self._sync_marks()
+            self._resolve_spans()
+            return
+        self._apply_folds()
+
+    def ensure_parsed(self) -> None:
+        if not self._rev_ok():
+            self._timer.stop()
+            self.refresh()
+
+    def _block(self, line: int):
+        return self.document().findBlockByNumber(line)
+
+    def collapsed_headers(self) -> Set[int]:
+        return {h for h in self._ranges if is_collapsed(self._block(h))}
+
+    def _apply_folds(self, collapsed: Optional[Set[int]] = None) -> None:
+        doc = self.document()
+        n = doc.blockCount()
+        if collapsed is None:
+            collapsed = self.collapsed_headers()
+        collapsed = {h for h in collapsed if h in self._ranges and h < n}
+        hidden = bytearray(n)
+        for h in collapsed:
+            s, e = self._ranges[h]
+            e = min(e, n - 1)
+            if s <= e:
+                hidden[s:e + 1] = b"\x01" * (e - s + 1)
+        dirty_from, dirty_to = -1, -1
+        block, i = doc.begin(), 0
+        while block.isValid():
+            set_collapsed(block, i in collapsed)
+            visible = not hidden[i]
+            if block.isVisible() != visible:
+                block.setVisible(visible)
+                if dirty_from < 0:
+                    dirty_from = block.position()
+                dirty_to = block.position() + block.length()
+            block = block.next()
+            i += 1
+        if dirty_from >= 0:
+            doc.markContentsDirty(dirty_from, dirty_to - dirty_from)
+        cur = self.textCursor()
+        if not cur.block().isVisible():
+            b = cur.block()
+            while b.isValid() and not b.isVisible():
+                b = b.previous()
+            if b.isValid():
+                c = QTextCursor(b)
+                c.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+                self.setTextCursor(c)
+        self.viewport().update()
+        self.gutter.update()
+        self.foldsChanged.emit()
+
+    def toggle_fold(self, header: int) -> None:
+        self.ensure_parsed()
+        if header not in self._ranges:
+            return
+        cur = self.collapsed_headers()
+        cur.symmetric_difference_update({header})
+        self._apply_folds(cur)
+
+    def set_branch_recursive(self, header: int, collapse: bool) -> None:
+        self.ensure_parsed()
+        node = self._map.node_at(header)
+        if node is None:
+            return
+        subtree = {self._map.line_of(n) for n in node.iter_preorder()}
+        subtree = {h for h in subtree if h in self._ranges}
+        cur = self.collapsed_headers()
+        cur = cur | subtree if collapse else cur - subtree
+        self._apply_folds(cur)
+
+    def _depth_of(self, header: int) -> int:
+        node = self._map.nodes[header]
+        return node.depth if node is not None else 0
+
+    def max_level(self) -> int:
+        self.ensure_parsed()
+        return max((self._depth_of(h) + 1 for h in self._ranges), default=0)
+
+    def current_level(self) -> int:
+        """Levels fully shown below the top-level items."""
+        vis_collapsed = [self._depth_of(h) for h in self.collapsed_headers()
+                         if self._block(h).isVisible()]
+        return min(vis_collapsed) if vis_collapsed else self.max_level()
+
+    def show_to_level(self, level: int) -> None:
+        self.ensure_parsed()
+        self._apply_folds({h for h in self._ranges if self._depth_of(h) >= level})
+        self.statusMessage.emit(f"Showing {level} level(s)")
+
+    def collapse_all(self) -> None:
+        self.show_to_level(0)
+        self.statusMessage.emit("Collapsed everything")
+
+    def expand_all(self) -> None:
+        self.ensure_parsed()
+        self._apply_folds(set())
+        self.statusMessage.emit("Expanded everything")
+
+    def expand_one_level(self) -> None:
+        self.ensure_parsed()
+        depths = [self._depth_of(h) for h in self.collapsed_headers()
+                  if self._block(h).isVisible()]
+        if not depths:
+            self.statusMessage.emit("Everything is already expanded")
+            return
+        self.show_to_level(min(depths) + 1)
+
+    def collapse_one_level(self) -> None:
+        self.ensure_parsed()
+        collapsed = self.collapsed_headers()
+        depths = [self._depth_of(h) for h in self._ranges
+                  if h not in collapsed and self._block(h).isVisible()]
+        if not depths:
+            self.statusMessage.emit("Everything is already collapsed")
+            return
+        self.show_to_level(max(depths))
+
+    def toggle_current(self) -> None:
+        self.ensure_parsed()
+        node = self._map.node_near(self.textCursor().blockNumber())
+        while node is not None and node.parent is not None:
+            h = self._map.line_of(node)
+            if h in self._ranges:
+                self.toggle_fold(h)
+                return
+            node = node.parent
+        self.statusMessage.emit("Nothing to collapse here")
+
+    def _current_header(self) -> Optional[int]:
+        self.ensure_parsed()
+        node = self._map.node_near(self.textCursor().blockNumber())
+        while node is not None and node.parent is not None:
+            h = self._map.line_of(node)
+            if h in self._ranges:
+                return h
+            node = node.parent
+        return None
+
+    def collapse_branch_fully(self) -> None:
+        h = self._current_header()
+        if h is not None:
+            self.set_branch_recursive(h, True)
+
+    def expand_branch_fully(self) -> None:
+        h = self._current_header()
+        if h is not None:
+            self.set_branch_recursive(h, False)
+
+    def reveal_line(self, line: int) -> bool:
+        self.ensure_parsed()
+        cur = self.collapsed_headers()
+        keep = {h for h in cur if not (self._ranges[h][0] <= line <= self._ranges[h][1])}
+        if keep != cur:
+            self._apply_folds(keep)
+            return True
+        return False
+
+    # ---- structural editing ----------------------------------------------
+    def _replace_text(self, new: str) -> None:
+        old = self.toPlainText()
+        if old == new:
+            return
+        p = len(os.path.commonprefix([old, new]))
+        max_s = min(len(old), len(new)) - p
+        s = len(os.path.commonprefix([old[::-1], new[::-1]]))
+        s = min(s, max_s)
+        cur = self.textCursor()        # editor cursor, so Undo returns here
+        if self._join_next_edit:
+            self._join_next_edit = False
+            cur.joinPreviousEditBlock()    # one Undo step with the edit before
+        else:
+            cur.beginEditBlock()
+        cur.setPosition(u16len(old[:p]))
+        cur.setPosition(u16len(old[:len(old) - s]), QTextCursor.MoveMode.KeepAnchor)
+        cur.insertText(new[p:len(new) - s])
+        cur.endEditBlock()
+        self.setTextCursor(cur)
+
+    def _cursor_context(self) -> Tuple[int, Optional[tm.Node], Optional[int]]:
+        """(line, node, cursor offset inside the node's name)"""
+        cur = self.textCursor()
+        line = cur.blockNumber()
+        node = self._map.node_near(line)
+        offset = None
+        if node is not None and self._map.kinds[line] == tm.KIND_NODE:
+            col = u16_to_cp(cur.block().text(), cur.positionInBlock())
+            offset = col - self._map.name_col.get(id(node), 0)
+        return line, node, offset
+
+    def run_op(self, op: Callable[[Optional[tm.Node]], Tuple[Optional[tm.Node], str]],
+               require_node: bool = True, message: str = "",
+               canonical: bool = False) -> bool:
+        """Apply a model operation, re-render the text (one undo step) and
+        keep folds, scroll position and cursor where the user expects them.
+
+        op(node) returns (focus_node, mode) where mode is
+        'keep' | 'start' | 'end' | 'select'.
+
+        canonical=True re-aligns all explanations automatically (Format
+        document); otherwise explanations keep the columns the user chose."""
+        self.ensure_parsed()
+        _, node, offset = self._cursor_context()
+        if require_node and node is None:
+            self.statusMessage.emit("Put the cursor on a branch line first")
+            return False
+        collapsed_nodes = [self._map.nodes[h] for h in self.collapsed_headers()]
+        marked_nodes = self._marked_nodes()
+        nodes_before = list(self._model.iter_nodes())      # keeps ids valid
+        keys_before = tm.node_keys(self._model)
+        self._remember_details_state()
+        vscroll = self.verticalScrollBar().value()
+        try:
+            focus, mode = op(node)
+        except tm.TreeError as ex:
+            self.statusMessage.emit(str(ex))
+            return False
+
+        text, lm = tm.render(self._model, self.options, preserve_columns=not canonical)
+        self._replace_text(text)
+        self._model, self._map = lm.doc, lm
+        self._ranges = lm.fold_ranges()
+        self._parsed_rev = self.document().revision()
+        self._timer.stop()
+
+        collapsed = {lm.line_of(n) for n in collapsed_nodes if n is not None}
+        collapsed.discard(None)
+        if focus is not None:
+            a = focus.parent
+            while a is not None:
+                collapsed.discard(lm.line_of(a))
+                a = a.parent
+        self._apply_folds(collapsed)
+        keys_after = tm.node_keys(self._model)
+        self._migrate_keys([(keys_before[id(n)], keys_after[id(n)]) for n in nodes_before
+                            if id(n) in keys_after and keys_before[id(n)] != keys_after[id(n)]])
+        self._state_id = (len(text), hash(text))
+        self._remember_details_state()
+        self._line_keys = self._compute_line_keys()
+        self._sync_marks({lm.line_of(n): m for n, m in marked_nodes
+                          if lm.line_of(n) is not None})
+        self._resolve_spans()
+        self.verticalScrollBar().setValue(vscroll)
+        if focus is not None and lm.line_of(focus) is not None:
+            self._place_cursor(focus, mode, offset)
+        self.ensureCursorVisible()
+        if message:
+            self.statusMessage.emit(message)
+        return True
+
+    def _place_cursor(self, node: tm.Node, mode: str, offset: Optional[int]) -> None:
+        block = self._block(self._map.line_of(node))
+        text = block.text()
+        ncol = min(self._map.name_col.get(id(node), 0), len(text))
+        end = min(ncol + len(node.name), len(text))
+        if mode == "start":
+            col = ncol
+        elif mode == "keep" and offset is not None:
+            col = ncol + max(0, min(offset, len(node.name)))
+        else:
+            col = end
+        cur = QTextCursor(block)
+        if mode == "select" and node.name:
+            cur.setPosition(block.position() + u16len(text[:ncol]))
+            cur.setPosition(block.position() + u16len(text[:end]), QTextCursor.MoveMode.KeepAnchor)
+        else:
+            cur.setPosition(block.position() + u16len(text[:col]))
+        self.setTextCursor(cur)
+
+    # individual operations
+    def add_sibling(self) -> None:
+        def op(node):
+            if node is None:
+                return self._new_root()
+            return tm.add_sibling_after(node, tm.Node("")), "start"
+        self.run_op(op, require_node=not self._model.is_empty(),
+                    message="New item added - type its name")
+
+    def add_child(self) -> None:
+        def op(node):
+            if node is None:
+                return self._new_root()
+            return tm.add_child(node, tm.Node("")), "start"
+        self.run_op(op, require_node=not self._model.is_empty(),
+                    message="New sub-item added - type its name")
+
+    def _new_root(self) -> Tuple[tm.Node, str]:
+        n = tm.Node("")
+        self._model.root.append_child(n)
+        return n, "start"
+
+    # ---- status marks (coloured branch names) ---------------------------
+    def _marked_nodes(self) -> List[Tuple[tm.Node, int]]:
+        out = []
+        for node in self._model.iter_nodes():
+            h = self._map.line_of(node)
+            if h is not None:
+                m = mark_of(self._block(h))
+                if m:
+                    out.append((node, m))
+        return out
+
+    def _sync_marks(self, desired: Optional[Dict[int, int]] = None) -> None:
+        """Bring line states and the mark registry in line.
+
+        desired (line -> mark) is given after a re-render: every line gets
+        exactly that mark. Afterwards, branch lines without a mark take it
+        from the registry (e.g. after Undo) and marked lines update it."""
+        doc = self.document()
+        changed = []
+        if desired is not None:
+            block, i = doc.begin(), 0
+            while block.isValid():
+                if set_mark_bits(block, desired.get(i, MARK_NONE)):
+                    changed.append(block)
+                block = block.next()
+                i += 1
+        keys = tm.node_keys(self._model)
+        for node in self._model.iter_nodes():
+            h = self._map.line_of(node)
+            if h is None or h >= doc.blockCount():
+                continue
+            block = self._block(h)
+            key = keys[id(node)]
+            m = mark_of(block)
+            if m:
+                self.marks[key] = m
+            elif key in self.marks and set_mark_bits(block, self.marks[key]):
+                changed.append(block)
+        for block in changed:
+            self.highlighter.rehighlightBlock(block)
+
+    def _selected_lines(self) -> Tuple[int, int, bool]:
+        """(first line, last line, has_selection)"""
+        doc = self.document()
+        cur = self.textCursor()
+        if not cur.hasSelection():
+            n = cur.blockNumber()
+            return n, n, False
+        a, p = cur.anchor(), cur.position()
+        first_b, last_b = doc.findBlock(min(a, p)), doc.findBlock(max(a, p))
+        first, last = first_b.blockNumber(), last_b.blockNumber()
+        if last > first and max(a, p) == last_b.position():
+            last -= 1                    # selection ends at the start of a line
+        return first, last, True
+
+    def _recolour(self, fn: Callable[[], None]) -> None:
+        """Re-colouring the text counts as a change for Qt, although the text is
+        the same - keep the tree information (fold arrows, badges) valid."""
+        was_ok = self._rev_ok()
+        fn()
+        if was_ok:
+            self._parsed_rev = self.document().revision()
+            self.gutter.update()
+            self.viewport().update()
+
+    def set_palette(self, palette: Palette) -> None:
+        """Use another colour legend (marks must be (re)loaded afterwards)."""
+        self.colours = palette
+        self._recolour(lambda: self.highlighter.set_overrides(*palette.overrides()))
+
+    def palette_changed(self) -> None:
+        """The legend was edited (colour, meaning, new colour)."""
+        self._recolour(lambda: self.highlighter.set_overrides(*self.colours.overrides()))
+
+    def mark_uses(self, mark: int) -> int:
+        """How many names / coloured words use this colour."""
+        self.ensure_parsed()
+        lines = sum(1 for _n, m in self._marked_nodes() if m == mark)
+        words = sum(1 for _k, sp in self.export_spans() if sp[3] == mark)
+        return lines + words
+
+    def clear_mark(self, mark: int) -> None:
+        """Remove a colour everywhere: those names and words get the default
+        text colour again."""
+        self.ensure_parsed()
+        self.marks = {k: m for k, m in self.marks.items() if m != mark}
+        for key in list(self.spans):
+            rest = [sp for sp in self.spans[key] if sp[3] != mark]
+            if rest:
+                self.spans[key] = rest
+            else:
+                del self.spans[key]
+        block = self.document().begin()
+        while block.isValid():
+            if mark_of(block) == mark and set_mark_bits(block, MARK_NONE):
+                self.highlighter.rehighlightBlock(block)
+            block = block.next()
+        self._resolve_spans()
+        self.marksChanged.emit()
+
+    def mark_selection(self, mark: int) -> None:
+        """Colour the names of the branch at the cursor (or of every branch in
+        the selection). Pressing the same mark again removes it."""
+        if mark and not self.colours.has_mark(mark):
+            self.statusMessage.emit("This colour is no longer in the legend")
+            return
+        self.ensure_parsed()
+        first, last, _ = self._selected_lines()
+        nodes: List[tm.Node] = []
+        seen: Set[int] = set()
+        for line in range(first, last + 1):
+            n = self._map.node_at(line)
+            if n is not None and id(n) not in seen and self._map.line_of(n) is not None:
+                seen.add(id(n))
+                nodes.append(n)
+        if not nodes:
+            self.statusMessage.emit("Put the cursor on a branch line first")
+            return
+        blocks = [self._block(self._map.line_of(n)) for n in nodes]
+        if mark and all(mark_of(b) == mark for b in blocks):
+            mark = MARK_NONE                                  # same key again = remove
+        keys = tm.node_keys(self._model)
+        for node, block in zip(nodes, blocks):
+            key = keys[id(node)]
+            if mark:
+                self.marks[key] = mark
+            else:
+                self.marks.pop(key, None)
+            if set_mark_bits(block, mark):
+                self.highlighter.rehighlightBlock(block)
+            # The line command decides the colour of the whole name again.
+            if key in self.spans:
+                rest = [sp for sp in self.spans[key]
+                        if not (sp[0] == "name" and sp[3] == MARK_DEFAULT)]
+                if rest:
+                    self.spans[key] = rest
+                else:
+                    del self.spans[key]
+        self._resolve_spans()
+        what = f"{len(nodes)} branches" if len(nodes) > 1 else f"“{nodes[0].name or '(empty)'}”"
+        self.statusMessage.emit(f"{what}: {self.colours.label(mark)}" if mark
+                                else f"{what}: default colour")
+        self.marksChanged.emit()
+
+    def export_marks(self) -> List[Tuple[tm.NodeKey, int]]:
+        self.ensure_parsed()
+        keys = tm.node_keys(self._model)
+        return [(keys[id(n)], m) for n, m in self._marked_nodes()]
+
+    def load_marks(self, entries: List[Tuple[tm.NodeKey, int]],
+                   spans: Optional[List[Tuple[tm.NodeKey, tm.Span]]] = None) -> None:
+        self.ensure_parsed()
+        self.marks = {key: m for key, m in entries if self.colours.has_mark(m)}
+        self.spans = {}
+        for key, sp in spans or []:
+            if (sp[3] == MARK_DEFAULT or self.colours.has_mark(sp[3])) \
+                    and sp[2] > sp[1] and sp[0] == "name":
+                self.spans.setdefault(key, []).append(sp)
+        self._sync_marks()
+        self._resolve_spans()
+
+    # ---- coloured words (selection only) ---------------------------------
+    def _compute_line_keys(self) -> List[Optional[tm.NodeKey]]:
+        keys = tm.node_keys(self._model)
+        return [keys.get(id(n)) if (n is not None and k in (tm.KIND_NODE, tm.KIND_COMMENT))
+                else None for k, n in zip(self._map.kinds, self._map.nodes)]
+
+    def _migrate_keys(self, pairs: List[Tuple[tm.NodeKey, tm.NodeKey]]) -> None:
+        """A branch got a new key (renamed / moved to another level): carry its
+        marks and coloured words over to the new key."""
+        if not pairs:
+            return
+        for reg in (self.marks, self.spans, self.details):
+            moved = {new: reg[old] for old, new in pairs if old in reg}
+            for old, _ in pairs:
+                reg.pop(old, None)
+            reg.update(moved)
+
+    def _migrate_details_aligned(self, old_keys: List[Optional[tm.NodeKey]],
+                                 new_keys: List[Optional[tm.NodeKey]]) -> None:
+        """Lines were added or removed by typing / Undo (not by a tree
+        command): match the unchanged lines and carry the pictures and
+        features of the rows whose key changed in between (renamed, other
+        level) over to their new key."""
+        if len(old_keys) > 50000 or len(new_keys) > 50000:
+            return
+        old_set, new_set = set(old_keys), set(new_keys)
+        pairs = []
+        sm = difflib.SequenceMatcher(None, old_keys, new_keys, autojunk=False)
+
+        def usable(o, n) -> bool:
+            return (o is not None and n is not None and o != n and o not in new_set
+                    and n not in old_set and o in self.details)
+
+        rest_old: List[tm.NodeKey] = []
+        rest_new: List[tm.NodeKey] = []
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == "equal":
+                continue
+            olds, news = old_keys[i1:i2], new_keys[j1:j2]
+            if tag == "replace" and len(olds) == len(news):
+                # same number of lines: line by line (names typed differently)
+                for o, n in zip(olds, news):
+                    if usable(o, n):
+                        pairs.append((o, n))
+                    else:
+                        rest_old.append(o)
+                        rest_new.append(n)
+            else:
+                rest_old.extend(olds)
+                rest_new.extend(news)
+        # Rows that were added / removed / moved elsewhere (e.g. Undo of
+        # "Delete line" or of a move to another place): match them by their
+        # own name when that name is unique on both sides.
+        old_leaf: Dict[str, List[tm.NodeKey]] = {}
+        new_leaf: Dict[str, List[tm.NodeKey]] = {}
+        done = {o for o, _ in pairs}
+        for keys, out in ((rest_old, old_leaf), (rest_new, new_leaf)):
+            for k in keys:
+                if k:
+                    out.setdefault(k[-1][0], []).append(k)
+        for leaf, ok in old_leaf.items():
+            nk = new_leaf.get(leaf)
+            if len(ok) == 1 and nk is not None and len(nk) == 1 and ok[0] not in done \
+                    and usable(ok[0], nk[0]):
+                pairs.append((ok[0], nk[0]))
+        if pairs:
+            moved = {new: self.details[old] for old, new in pairs}
+            for old, _ in pairs:
+                self.details.pop(old, None)
+            self.details.update(moved)
+
+    def _remember_details_state(self) -> None:
+        """Note which key holds which details in the current text state."""
+        states = self._details_states
+        if not self.details and not states:
+            return
+        states.pop(self._state_id, None)                 # most recent last
+        states[self._state_id] = {k: d for k, d in self.details.items() if not d.is_empty()}
+        limit = max(20, 200000 // max(1, len(self.details)))
+        while len(states) > limit:
+            del states[next(iter(states))]
+
+    def _restore_details_state(self, known: Dict[tm.NodeKey, "idt.ItemDetails"]) -> None:
+        """The text is one seen before (Undo / Redo): every row gets exactly
+        the details it had then (with their current content). Details added
+        since then keep the key the migration gave them."""
+        in_known = {id(d) for d in known.values()}
+        new = {k: d for k, d in known.items() if not d.is_empty()}
+        for k, d in self.details.items():
+            if id(d) in in_known or d.is_empty():
+                continue
+            if k not in new:
+                new[k] = d
+        self.details.clear()
+        self.details.update(new)
+
+    def current_item(self) -> Optional[tm.Node]:
+        """The branch at the cursor (its name or explanation line), or None."""
+        if not self._rev_ok():
+            return None
+        return self._map.node_at(self.textCursor().blockNumber())
+
+    def export_details(self) -> List[Tuple[tm.NodeKey, "idt.ItemDetails"]]:
+        """Pictures / features of the rows that exist in the tree (in tree order)."""
+        self.ensure_parsed()
+        keys = tm.node_keys(self._model)
+        out = []
+        for node in self._model.iter_nodes():
+            d = self.details.get(keys[id(node)])
+            if d is not None and not d.is_empty():
+                out.append((keys[id(node)], d))
+        return out
+
+    def _line_segments(self, line: int, text: str, comment_no: Dict[int, int]):
+        """[(node, segment id, start, end, bold)] for one line."""
+        kind = self._map.kinds[line] if line < len(self._map) else None
+        node = self._map.nodes[line] if line < len(self._map) else None
+        if node is None or kind not in (tm.KIND_NODE, tm.KIND_COMMENT):
+            return []
+        out = []
+        for part, s, e in tm.line_segments(text):
+            if kind == tm.KIND_NODE:
+                seg = "name" if part == "name" else "c0"
+            elif part == "comment":
+                seg = f"c{comment_no.get(line, 1)}"
+            else:
+                continue
+            out.append((node, seg, s, e, seg == "name" and node.name.endswith(("/", "\\"))))
+        return out
+
+    def _comment_numbers(self) -> Dict[int, int]:
+        """line -> number of the explanation line (1, 2, ...) for continuation lines."""
+        out: Dict[int, int] = {}
+        count: Dict[int, int] = {}
+        for i, (k, n) in enumerate(zip(self._map.kinds, self._map.nodes)):
+            if k == tm.KIND_COMMENT and n is not None:
+                count[id(n)] = count.get(id(n), 0) + 1
+                out[i] = count[id(n)]
+        return out
+
+    def _resolve_spans(self) -> None:
+        """Place every coloured word on its line again (after edits, moves,
+        undo) and repaint the lines whose colours changed."""
+        doc = self.document()
+        keys = tm.node_keys(self._model)
+        wanted = {k for k, v in self.spans.items() if v}
+        new_lines: Dict[int, List[Tuple[int, int, int, bool]]] = {}
+        visible: Dict[tm.NodeKey, List[tm.Span]] = {}
+        if wanted:
+            numbers = self._comment_numbers()
+            n_lines = min(len(self._map), doc.blockCount())
+            for line in range(n_lines):
+                node = self._map.nodes[line]
+                if node is None or keys.get(id(node)) not in wanted:
+                    continue
+                key = keys[id(node)]
+                text = self._block(line).text()
+                for _n, seg, s, e, bold in self._line_segments(line, text, numbers):
+                    if seg != "name":
+                        continue                     # explanations are never coloured
+                    seg_text = text[s:e]
+                    resolved = []
+                    for sp in self.spans[key]:
+                        if sp[0] != seg:
+                            continue
+                        r = tm.resolve_span(sp, seg_text)
+                        if r is not None:
+                            resolved.append(r)
+                            new_lines.setdefault(line, []).append(
+                                (u16len(text[:s + r[1]]), u16len(text[:s + r[2]]), r[3], bold))
+                    if resolved:
+                        visible.setdefault(key, []).extend(resolved)
+            # Keep positions up to date; words that are gone stay remembered
+            # (so Undo brings them back) but are not shown or saved.
+            for key, found in visible.items():
+                found_ids = {(sp[0], sp[4]) for sp in found}
+                self.spans[key] = found + [sp for sp in self.spans[key]
+                                           if (sp[0], sp[4]) not in found_ids]
+        old_lines = self._line_spans
+        self._line_spans = new_lines
+        self._visible_spans = visible
+        for line in set(old_lines) | set(new_lines):
+            if old_lines.get(line) != new_lines.get(line) and line < doc.blockCount():
+                self.highlighter.rehighlightBlock(self._block(line))
+
+    def mark_words(self, mark: int) -> None:
+        """Colour only the selected characters / the word at the cursor in
+        branch names. Explanations and tree lines are never coloured. Same
+        colour again removes it."""
+        if mark and not self.colours.has_mark(mark):
+            self.statusMessage.emit("This colour is no longer in the legend")
+            return
+        self.ensure_parsed()
+        cur = self.textCursor()
+        doc = self.document()
+        if not cur.hasSelection():
+            word = self._word_at_cursor()
+            if word is None:
+                self.statusMessage.emit("No word at the cursor - put the cursor on a word of a "
+                                        "name (explanations always keep their own colour)")
+                return
+            a, b = word
+        else:
+            a, b = sorted((cur.anchor(), cur.position()))
+        first, last = doc.findBlock(a).blockNumber(), doc.findBlock(b).blockNumber()
+        keys = tm.node_keys(self._model)
+        numbers = self._comment_numbers()
+        pieces = []
+        for line in range(first, last + 1):
+            block = self._block(line)
+            text = block.text()
+            la = u16_to_cp(text, max(a, block.position()) - block.position())
+            lb = u16_to_cp(text, min(b, block.position() + u16len(text)) - block.position())
+            for node, seg, s, e, _bold in self._line_segments(line, text, numbers):
+                if seg != "name":
+                    continue                         # explanations keep their colour
+                x, y = max(s, la), min(e, lb)
+                if x < y:
+                    pieces.append((keys[id(node)], seg, x - s, y - s, text[s:e], node))
+        if not pieces:
+            self.statusMessage.emit("Nothing to colour here - explanations always keep their "
+                                    "own colour; colour names instead")
+            return
+        if mark and all(tm.is_covered(self.spans.get(k, []), seg, x, y, mark)
+                        for k, seg, x, y, _t, _n in pieces):
+            mark = MARK_NONE                                  # same key again = remove
+
+        def line_coloured(node: tm.Node, seg: str) -> bool:
+            h = self._map.line_of(node)
+            return seg == "name" and h is not None and mark_of(self._block(h)) != MARK_NONE
+
+        what = "Selected text" if cur.hasSelection() else "Word at cursor"
+        if mark == MARK_NONE:
+            # Default colour: drop word colours; inside a name that has a
+            # whole-line colour, store "default" so the normal colour shows.
+            def already_default(k, seg, x, y, node) -> bool:
+                if any(sp[0] == seg and sp[3] != MARK_DEFAULT and sp[1] < y and sp[2] > x
+                       for sp in self.spans.get(k, [])):
+                    return False
+                return (not line_coloured(node, seg)
+                        or tm.is_covered(self.spans.get(k, []), seg, x, y, MARK_DEFAULT))
+            if all(already_default(k, seg, x, y, n) for k, seg, x, y, _t, n in pieces):
+                self.statusMessage.emit(f"{what}: already in the default colour")
+                return
+        for key, seg, x, y, seg_text, node in pieces:
+            lst = tm.subtract_range(self.spans.get(key, []), seg, x, y)
+            if mark:
+                lst = tm.add_span(lst, seg, x, y, mark, seg_text)
+            elif line_coloured(node, seg):
+                lst = tm.add_span(lst, seg, x, y, MARK_DEFAULT, seg_text)
+            if lst:
+                self.spans[key] = lst
+            else:
+                self.spans.pop(key, None)
+        self._resolve_spans()
+        self.statusMessage.emit(f"{what}: {self.colours.label(mark)}" if mark
+                                else f"{what}: default colour")
+        self.marksChanged.emit()
+
+    def _word_at_cursor(self) -> Optional[Tuple[int, int]]:
+        """Document positions (start, end) of the word at the cursor inside a
+        branch name; None on spaces, tree lines and explanations."""
+        cur = self.textCursor()
+        block = cur.block()
+        line = block.blockNumber()
+        text = block.text()
+        col = u16_to_cp(text, cur.positionInBlock())
+        for _node, seg, s, e, _bold in self._line_segments(line, text, self._comment_numbers()):
+            if seg == "name" and s <= col <= e:
+                w = tm.word_at(text[s:e], col - s)
+                if w is not None:
+                    pos = block.position()
+                    return pos + u16len(text[:s + w[0]]), pos + u16len(text[:s + w[1]])
+        return None
+
+    def export_spans(self) -> List[Tuple[tm.NodeKey, tm.Span]]:
+        self.ensure_parsed()
+        self._resolve_spans()
+        return [(key, sp) for key, lst in self._visible_spans.items() for sp in lst]
+
+    def delete_line(self) -> None:
+        """Ctrl+Q: delete only the row at the cursor (a branch row keeps its
+        sub-items: they move up one level into its place)."""
+        self.ensure_parsed()
+        line = self.textCursor().blockNumber()
+        if not 0 <= line < len(self._map):
+            self.statusMessage.emit("Nothing to delete here")
+            return
+        kind = self._map.kinds[line]
+        node = self._map.nodes[line]
+        comment_index = self._comment_numbers().get(line, 0)
+        preamble_index = sum(1 for k in self._map.kinds[:line] if k == tm.KIND_PREAMBLE)
+        if kind == tm.KIND_NODE and node is not None and node.parent is None:
+            self.statusMessage.emit("Nothing to delete here")
+            return
+        what = {tm.KIND_NODE: "Line deleted (sub-items kept)",
+                tm.KIND_COMMENT: "Explanation line deleted",
+                tm.KIND_GAP: "Empty line deleted",
+                tm.KIND_PREAMBLE: "Line deleted"}.get(kind, "Line deleted")
+        if kind == tm.KIND_NODE and node is not None and not node.children:
+            what = "Line deleted"
+
+        def op(_n):
+            tm.delete_row(self._model, kind, node, comment_index, preamble_index)
+            return None, "keep"
+
+        if not self.run_op(op, require_node=False):
+            return
+        doc = self.document()
+        target = min(line, doc.blockCount() - 1)
+        block = doc.findBlockByNumber(max(0, target))
+        while block.isValid() and not block.isVisible():
+            block = block.previous()
+        if not block.isValid():
+            block = doc.begin()
+        n = block.blockNumber()
+        col = 0
+        if self._map.kinds[n] == tm.KIND_NODE if n < len(self._map) else False:
+            col = min(self._map.name_col.get(id(self._map.nodes[n]), 0), len(block.text()))
+        cur = QTextCursor(block)
+        cur.setPosition(block.position() + u16len(block.text()[:col]))
+        self.setTextCursor(cur)
+        self.ensureCursorVisible()
+        self.statusMessage.emit(f"{what} - Ctrl+Z to undo")
+
+    def insert_spacer(self) -> None:
+        """Alt+Enter: insert an empty line below the current line. The vertical
+        branch lines on the left are kept; everything else stays the same."""
+        self.ensure_parsed()
+        line = self.textCursor().blockNumber()
+        if self._model.is_empty() or not (0 <= line < len(self._map)):
+            self.statusMessage.emit("Put the cursor on a branch line first")
+            return
+        kind = self._map.kinds[line]
+        node = self._map.nodes[line]
+        if kind == tm.KIND_GAP:
+            target = node                     # another empty line at the same place
+        elif kind in (tm.KIND_NODE, tm.KIND_COMMENT) and node is not None:
+            header = self._map.line_of(node)
+            if node.children and header not in self.collapsed_headers():
+                target = node.children[0]     # between the branch and its first sub-item
+            else:
+                target = tm.node_after_subtree(node)
+        else:
+            self.statusMessage.emit("Put the cursor on a branch line first")
+            return
+
+        def op(_n):
+            tm.insert_spacer(self._model, target)
+            return None, "keep"
+
+        if not self.run_op(op, require_node=False):
+            return
+        doc = self.document()
+        new_line = (self._map.line_of(target) - 1) if target is not None else doc.blockCount() - 1
+        block = doc.findBlockByNumber(max(0, new_line))
+        cur = QTextCursor(block)
+        cur.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        self.setTextCursor(cur)
+        self.ensureCursorVisible()
+        self.statusMessage.emit("Empty line inserted - Ctrl+Z to undo")
+
+    def delete_branch(self) -> None:
+        def op(node):
+            parent = node.parent
+            idx = node.index
+            count = node.descendant_count()
+            tm.delete(node)
+            if idx < len(parent.children):
+                focus = parent.children[idx]
+            elif idx > 0:
+                focus = parent.children[idx - 1]
+            else:
+                focus = parent if parent.parent is not None else None
+            op.count = count
+            return focus, "end"
+        op.count = 0
+        if self.run_op(op):
+            extra = f" and {op.count} sub-item(s)" if op.count else ""
+            self.statusMessage.emit(f"Deleted branch{extra} - Ctrl+Z to undo")
+
+    def move_up(self) -> None:
+        self.run_op(lambda n: (tm.move_up(n), (n, "keep"))[1])
+
+    def move_down(self) -> None:
+        self.run_op(lambda n: (tm.move_down(n), (n, "keep"))[1])
+
+    def indent(self) -> None:
+        self.run_op(lambda n: (tm.indent(n), (n, "keep"))[1])
+
+    def outdent(self) -> None:
+        self.run_op(lambda n: (tm.outdent(n), (n, "keep"))[1])
+
+    def duplicate(self) -> None:
+        self.run_op(lambda n: (tm.duplicate(n), "end"), message="Branch duplicated")
+
+    def format_document(self, quiet: bool = False, canonical: bool = True) -> None:
+        """canonical=True: full auto-alignment (Ctrl+Alt+L).
+        canonical=False: tidy the tree lines but keep the explanation columns
+        (used when saving, so manual alignment is not lost)."""
+        self.run_op(lambda n: (n, "keep"), require_node=False,
+                    message="" if quiet else "Document formatted", canonical=canonical)
+
+    def shift_explanations(self, direction: int) -> None:
+        """Move explanations left (-1) / right (+1): the selected lines, or the
+        whole document when nothing is selected. The selection is kept so the
+        shortcut can be pressed repeatedly."""
+        self.ensure_parsed()
+        doc = self.document()
+        cur = self.textCursor()
+        anchor_b = doc.findBlock(cur.anchor())
+        pos_b = doc.findBlock(cur.position())
+        anchor = (anchor_b.blockNumber(), cur.anchor() - anchor_b.position())
+        pos = (pos_b.blockNumber(), cur.position() - pos_b.position())
+        whole = not cur.hasSelection()
+        if whole:
+            nodes = [n for n in self._model.iter_nodes() if n.comment]
+        else:
+            first, last = sorted((anchor[0], pos[0]))
+            # A selection ending at column 0 of a line does not include that line.
+            if last > first and (pos if pos[0] == last else anchor)[1] == 0:
+                last -= 1
+            seen: Set[int] = set()
+            nodes = []
+            for line in range(first, last + 1):
+                n = self._map.node_at(line)
+                if n is not None and n.comment and id(n) not in seen:
+                    seen.add(id(n))
+                    nodes.append(n)
+        gap = self.options.comment_gap
+        result = {}
+
+        def op(_node):
+            result["col"] = tm.shift_comments(nodes, direction, gap)
+            return None, "keep"
+
+        if not self.run_op(op, require_node=False):
+            return
+        # Restore the cursor/selection on the same lines.
+        new = QTextCursor(doc)
+
+        def to_pos(line_col: Tuple[int, int]) -> int:
+            b = doc.findBlockByNumber(min(line_col[0], doc.blockCount() - 1))
+            return b.position() + min(line_col[1], b.length() - 1)
+        new.setPosition(to_pos(anchor))
+        new.setPosition(to_pos(pos), QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(new)
+        scope = "whole document" if whole else f"{len(nodes)} explanation(s)"
+        side = "right" if direction > 0 else "left"
+        self.statusMessage.emit(f"Explanations moved {side} ({scope}) - column {result['col'] + 1}")
+
+    def edit_current(self, focus_explanation: bool = False) -> None:
+        self.ensure_parsed()
+        _, node, _ = self._cursor_context()
+        if node is None:
+            self.statusMessage.emit("Put the cursor on a branch line first")
+            return
+        dlg = EditNodeDialog(self, node, self.font(), focus_explanation or not node.children)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        name, comment = dlg.values()
+        target = node
+
+        def op(n):
+            target.name, target.comment = name, comment
+            return target, "end"
+        self.run_op(op, require_node=False, message="Branch updated")
+
+    # ---- keyboard ---------------------------------------------------------
+    def keyPressEvent(self, e) -> None:
+        if self._col_mode and self._column_key(e):
+            return
+        key = e.key()
+        mods = e.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        plain = mods == Qt.KeyboardModifier.NoModifier
+        has_sel = self.textCursor().hasSelection()
+        if plain and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not has_sel:
+            if self._smart_enter():
+                return
+        elif plain and key == Qt.Key.Key_Tab:
+            if self._on_branch_line():
+                self.indent()
+            else:
+                self.insertPlainText(" " * tm.INDENT)
+            return
+        elif key == Qt.Key.Key_Backtab:
+            if self._on_branch_line():
+                self.outdent()
+            return
+        elif plain and key == Qt.Key.Key_Backspace and not has_sel:
+            if self._smart_backspace():
+                return
+        elif plain and key == Qt.Key.Key_Delete and not has_sel:
+            cur = self.textCursor()
+            nxt = cur.block().next()
+            if cur.atBlockEnd() and nxt.isValid() and not nxt.isVisible():
+                self.reveal_line(nxt.blockNumber())
+                self.statusMessage.emit("Expanded the folded branch first")
+                return
+        super().keyPressEvent(e)
+
+    def _on_branch_line(self) -> bool:
+        self.ensure_parsed()
+        return self._map.node_at(self.textCursor().blockNumber()) is not None
+
+    def _smart_enter(self) -> bool:
+        self.ensure_parsed()
+        line, node, offset = self._cursor_context()
+        if node is None or offset is None or self._map.kinds[line] != tm.KIND_NODE:
+            return False
+        name_len = len(node.name)
+        header = self._map.line_of(node)
+
+        if not node.name and not node.children and not node.comment:
+            if node.parent is not None and node.parent.parent is not None:
+                self.run_op(lambda n: (tm.outdent(n), (n, "start"))[1])
+                return True
+        if offset <= 0 and node.name:
+            self.run_op(lambda n: (tm.add_sibling_before(n, tm.Node("")), (n, "start"))[1])
+            return True
+        if 0 < offset < name_len:
+            left, right = node.name[:offset].rstrip(), node.name[offset:].lstrip()
+
+            def split(n):
+                n.name = left
+                return tm.add_sibling_after(n, tm.Node(right)), "start"
+            self.run_op(split)
+            return True
+        expanded_with_kids = node.children and header not in self.collapsed_headers()
+        if node.depth == 0 or expanded_with_kids:
+            self.run_op(lambda n: (tm.add_child(n, tm.Node(""), first=True), "start"))
+        else:
+            self.run_op(lambda n: (tm.add_sibling_after(n, tm.Node("")), "start"))
+        return True
+
+    def _smart_backspace(self) -> bool:
+        self.ensure_parsed()
+        cur = self.textCursor()
+        prev = cur.block().previous()
+        if cur.atBlockStart() and prev.isValid() and not prev.isVisible():
+            self.reveal_line(prev.blockNumber())
+            self.statusMessage.emit("Expanded the folded branch first")
+            return True
+        line, node, offset = self._cursor_context()
+        if (node is not None and offset is not None and offset <= 0
+                and not node.name and not node.children and not node.comment
+                and node.parent is not None):
+            def op(n):
+                focus = tm.previous_in_order(self._model, n)
+                tm.delete(n)
+                return focus, "end"
+            self.run_op(op)
+            return True
+        return False
+
+    # ---- navigation over hidden lines --------------------------------------
+    def _on_cursor_moved(self) -> None:
+        cur = self.textCursor()
+        b = cur.block()
+        if not b.isVisible():
+            forward = b.blockNumber() > self._last_block
+            nb = b
+            if forward:
+                while nb.isValid() and not nb.isVisible():
+                    nb = nb.next()
+            if not forward or not nb.isValid():
+                nb = b
+                while nb.isValid() and not nb.isVisible():
+                    nb = nb.previous()
+            if nb.isValid():
+                mode = (QTextCursor.MoveMode.KeepAnchor if cur.hasSelection()
+                        else QTextCursor.MoveMode.MoveAnchor)
+                cur.setPosition(nb.position(), mode)
+                self.setTextCursor(cur)
+                return
+        self._last_block = b.blockNumber()
+        if self._blk is not None and not self._blk_internal:
+            self._blk = None                         # cursor moved elsewhere: block ends
+            self.viewport().update()
+        self._highlight_current_line()
+        self.gutter.update()
+
+    def _highlight_current_line(self) -> None:
+        sel = QTextEdit.ExtraSelection()
+        sel.format.setBackground(QColor(self.theme.current_line))
+        sel.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+        sel.cursor = self.textCursor()
+        sel.cursor.clearSelection()
+        self.setExtraSelections([sel])
+
+    # ---- gutter -------------------------------------------------------------
+    def _fold_w(self) -> int:
+        return max(14, int(self.fontMetrics().height() * 0.95))
+
+    def gutter_width(self) -> int:
+        digits = max(3, len(str(self.blockCount())))
+        return 10 + self.fontMetrics().horizontalAdvance("9") * digits + 6 + self._fold_w()
+
+    def _update_gutter_width(self, *_args) -> None:
+        self.setViewportMargins(self.gutter_width(), 0, 0, 0)
+        cr = self.contentsRect()
+        self.gutter.setGeometry(QRect(cr.left(), cr.top(), self.gutter_width(), cr.height()))
+
+    def _on_update_request(self, rect, dy) -> None:
+        if dy:
+            self.gutter.scroll(0, dy)
+        else:
+            self.gutter.update(0, rect.y(), self.gutter.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self._update_gutter_width()
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        self._update_gutter_width()
+
+    def _painted_blocks(self, top: float, bottom: float):
+        block = self.firstVisibleBlock()
+        offset = self.contentOffset()
+        can_skip = self._rev_ok()
+        while block.isValid():
+            if block.isVisible():
+                geo = self.blockBoundingGeometry(block).translated(offset)
+                if geo.top() > bottom:
+                    break
+                if geo.bottom() >= top:
+                    yield block, geo
+                n = block.blockNumber()
+                if can_skip and n in self._ranges and is_collapsed(block):
+                    block = self._block(self._ranges[n][1] + 1)
+                    continue
+            block = block.next()
+
+    def paint_gutter(self, event) -> None:
+        p = QPainter(self.gutter)
+        p.fillRect(event.rect(), QColor(self.theme.gutter_bg))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fm = self.fontMetrics()
+        line_h = fm.height()
+        fw = self._fold_w()
+        w = self.gutter.width()
+        cur_line = self.textCursor().blockNumber()
+        ranges = self._ranges if self._rev_ok() else {}
+        for block, geo in self._painted_blocks(event.rect().top(), event.rect().bottom()):
+            n = block.blockNumber()
+            top = int(geo.top())
+            p.setPen(QColor(self.theme.gutter_cur if n == cur_line else self.theme.gutter_fg))
+            p.drawText(0, top, w - fw - 8, line_h,
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, str(n + 1))
+            if n in ranges:
+                self._draw_arrow(p, QRectF(w - fw - 2, top, fw, line_h),
+                                 is_collapsed(block))
+        p.end()
+
+    def _draw_arrow(self, p: QPainter, r: QRectF, collapsed: bool) -> None:
+        s = min(r.width(), r.height()) * 0.28
+        c = r.center()
+        if collapsed:
+            pts = [QPointF(c.x() - s * 0.6, c.y() - s), QPointF(c.x() - s * 0.6, c.y() + s),
+                   QPointF(c.x() + s * 0.8, c.y())]
+        else:
+            pts = [QPointF(c.x() - s, c.y() - s * 0.6), QPointF(c.x() + s, c.y() - s * 0.6),
+                   QPointF(c.x(), c.y() + s * 0.8)]
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(self.theme.fold))
+        p.drawPolygon(QPolygonF(pts))
+
+    def gutter_clicked(self, e) -> None:
+        self.ensure_parsed()
+        y = e.position().y()
+        for block, geo in self._painted_blocks(y, y):
+            if geo.top() <= y <= geo.bottom():
+                n = block.blockNumber()
+                if n in self._ranges:
+                    if e.modifiers() & Qt.KeyboardModifier.AltModifier:
+                        self.set_branch_recursive(n, not is_collapsed(block))
+                    else:
+                        self.toggle_fold(n)
+                else:
+                    self.setTextCursor(QTextCursor(block))
+                return
+
+    # ---- "⋯ N items" badge after folded branches ---------------------------
+    def _badge(self, block, geo: QRectF) -> Tuple[QRectF, str]:
+        node = self._map.nodes[block.blockNumber()]
+        count = node.descendant_count() if node is not None else 0
+        label = f"⋯ {count} item{'s' if count != 1 else ''}"
+        fm = QFontMetricsF(self.font())
+        x = (geo.left() + self.document().documentMargin()
+             + fm.horizontalAdvance(block.text()) + fm.horizontalAdvance("  "))
+        rect = QRectF(x, geo.top() + 1, fm.horizontalAdvance(label) + 12, fm.height() - 2)
+        return rect, label
+
+    def paintEvent(self, e) -> None:
+        super().paintEvent(e)
+        if self._blk is not None:
+            self._paint_block(e)
+        if not self._ranges or not self._rev_ok():
+            return
+        p = QPainter(self.viewport())
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for block, geo in self._painted_blocks(e.rect().top(), e.rect().bottom()):
+            n = block.blockNumber()
+            if n in self._ranges and is_collapsed(block):
+                rect, label = self._badge(block, geo)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(self.theme.badge_bg))
+                p.drawRoundedRect(rect, 4, 4)
+                p.setPen(QColor(self.theme.badge_fg))
+                p.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+        p.end()
+
+    def _badge_hit(self, pos: QPointF) -> Optional[int]:
+        if not self._rev_ok():
+            return None
+        block = self.cursorForPosition(pos.toPoint()).block()
+        n = block.blockNumber()
+        if n in self._ranges and is_collapsed(block):
+            geo = self.blockBoundingGeometry(block).translated(self.contentOffset())
+            if self._badge(block, geo)[0].contains(pos):
+                return n
+        return None
+
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            hit = self._badge_hit(e.position())
+            if hit is not None:
+                self.toggle_fold(hit)
+                e.accept()
+                return
+            if self._col_mode:
+                line, col = self._point_to_linecol(e.position())
+                if e.modifiers() & Qt.KeyboardModifier.ShiftModifier and self._blk is not None:
+                    self._set_block(self._blk[0], self._blk[1], line, col)
+                else:
+                    self._set_block(line, col, line, col)
+                self._blk_drag = True
+                self.setFocus()
+                e.accept()
+                return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:
+        if self._blk_drag:
+            self._blk_drag = False
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def mouseMoveEvent(self, e) -> None:
+        if self._blk_drag and e.buttons() & Qt.MouseButton.LeftButton and self._blk is not None:
+            line, col = self._point_to_linecol(e.position())
+            self._set_block(self._blk[0], self._blk[1], line, col)
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+        if not e.buttons():
+            shape = (Qt.CursorShape.PointingHandCursor if self._badge_hit(e.position()) is not None
+                     else Qt.CursorShape.IBeamCursor)
+            self.viewport().setCursor(shape)
+
+    # ---- context menu, drag & drop ----------------------------------------
+    def contextMenuEvent(self, e) -> None:
+        if not self.textCursor().hasSelection():
+            self.setTextCursor(self.cursorForPosition(e.pos()))
+        menu = self.createStandardContextMenu()
+        first = menu.actions()[0] if menu.actions() else None
+        for a in self.context_actions:
+            if a is None:
+                menu.insertSeparator(first)
+            else:
+                menu.insertAction(first, a)
+        menu.insertSeparator(first)
+        menu.exec(e.globalPos())
+
+    # ---- column (block) selection - like PyCharm's Alt+Shift+Insert -----------
+    def set_column_mode(self, on: bool) -> None:
+        on = bool(on)
+        if on == self._col_mode:
+            return
+        self._col_mode = on
+        if on:
+            doc = self.document()
+            cur = self.textCursor()
+            a = doc.findBlock(cur.anchor())
+            p = doc.findBlock(cur.position())
+            self._set_block(a.blockNumber(), u16_to_cp(a.text(), cur.anchor() - a.position()),
+                            p.blockNumber(), u16_to_cp(p.text(), cur.position() - p.position()))
+            self.statusMessage.emit("Column selection ON - Shift+arrows or drag to select "
+                                    "a rectangle, then type, Tab, Backspace, copy or paste")
+        else:
+            self._blk = None
+            self.viewport().update()
+            self.statusMessage.emit("Column selection OFF - normal line selection")
+        self.columnModeChanged.emit(on)
+
+    def toggle_column_mode(self) -> None:
+        self.set_column_mode(not self._col_mode)
+
+    def column_mode(self) -> bool:
+        return self._col_mode
+
+    def block_rect(self) -> Optional[Tuple[int, int, int, int]]:
+        """(top line, bottom line, left col, right col) of the column selection."""
+        if self._blk is None:
+            return None
+        al, ac, l, c = self._blk
+        return min(al, l), max(al, l), min(ac, c), max(ac, c)
+
+    def _block_rows(self) -> List[int]:
+        top, bottom, _c1, _c2 = self.block_rect()
+        bottom = min(bottom, self.document().blockCount() - 1)
+        return [n for n in range(top, bottom + 1) if self._block(n).isVisible()]
+
+    def _set_block(self, al: int, ac: int, line: int, col: int) -> None:
+        n = self.document().blockCount() - 1
+        al, line = max(0, min(al, n)), max(0, min(line, n))
+        ac, col = max(0, ac), max(0, col)
+        self._blk = [al, ac, line, col]
+        self._blk_rev = self.document().revision()
+        block = self._block(line)
+        text = block.text()
+        cur = QTextCursor(block)
+        cur.setPosition(block.position() + u16len(text[:min(col, len(text))]))
+        self._blk_internal = True
+        try:
+            self.setTextCursor(cur)
+        finally:
+            self._blk_internal = False
+        self.ensureCursorVisible()
+        self.viewport().update()
+
+    def _block_check_edit(self) -> None:
+        """Any edit that is not a column edit ends the column selection."""
+        if self._blk is not None and not self._blk_internal \
+                and self.document().revision() != self._blk_rev:
+            self._blk = None
+            self.viewport().update()
+
+    def _block_text(self) -> str:
+        _t, _b, c1, c2 = self.block_rect()
+        return "\n".join(self._block(n).text()[c1:c2] for n in self._block_rows())
+
+    def _block_edit(self, edits: List[Tuple[int, int, int, str]]) -> None:
+        """Apply [(line, start col, end col, new text)] as ONE undo step."""
+        doc = self.document()
+        cur = QTextCursor(doc)
+        self._blk_internal = True
+        try:
+            cur.beginEditBlock()
+            for line, start, end, insert in edits:
+                block = doc.findBlockByNumber(line)
+                text = block.text()
+                pad = " " * max(0, start - len(text))
+                a = min(start, len(text))
+                b = max(a, min(end, len(text)))
+                if a == b and not (pad + insert):
+                    continue
+                cur.setPosition(block.position() + u16len(text[:a]))
+                cur.setPosition(block.position() + u16len(text[:b]), QTextCursor.MoveMode.KeepAnchor)
+                cur.insertText(pad + insert)
+            cur.endEditBlock()
+        finally:
+            self._blk_internal = False
+        self._blk_rev = doc.revision()
+
+    def _block_replace(self, insert: str) -> None:
+        """Typing / pasting one line: replaces the rectangle on every row."""
+        top, bottom, c1, c2 = self.block_rect()
+        rows = self._block_rows()
+        self._block_edit([(n, c1, c2, insert) for n in rows])
+        col = c1 + len(insert)
+        self._set_block(self._blk[0], col, self._blk[2], col)
+
+    def _block_delete(self, forward: bool) -> None:
+        top, bottom, c1, c2 = self.block_rect()
+        rows = self._block_rows()
+        if c2 > c1:
+            self._block_edit([(n, c1, c2, "") for n in rows])
+            col = c1
+        elif forward:
+            self._block_edit([(n, c1, c1 + 1, "") for n in rows
+                              if c1 < len(self._block(n).text())])
+            col = c1
+        else:
+            if c1 == 0:
+                return
+            # remove a whole "➡️" (2 characters) when the caret is behind it
+            edits = []
+            for n in rows:
+                text = self._block(n).text()
+                if c1 <= len(text):
+                    start = c1 - 2 if text[c1 - 1] == "\ufe0f" and c1 >= 2 else c1 - 1
+                    edits.append((n, start, c1, ""))
+            self._block_edit(edits)
+            col = c1 - 1
+        al, _ac, l, _c = self._blk
+        self._set_block(al, col, l, col)
+
+    def _block_indent(self, outdent: bool) -> None:
+        top, bottom, c1, c2 = self.block_rect()
+        rows = self._block_rows()
+        al, _ac, l, _c = self._blk
+        if not outdent:
+            self._block_edit([(n, c1, c1, " " * tm.INDENT) for n in rows])
+            ac, c = self._blk[1] + tm.INDENT, self._blk[3] + tm.INDENT
+            self._set_block(al, ac, l, c)
+            return
+        removed = {}
+        for n in rows:
+            text = self._block(n).text()
+            k = 0
+            while k < tm.INDENT and 0 <= c1 - k - 1 < len(text) and text[c1 - k - 1] == " ":
+                k += 1
+            if k:
+                removed[n] = k
+        if not removed:
+            self.statusMessage.emit("No spaces left of the column selection")
+            return
+        self._block_edit([(n, c1 - k, c1, "") for n, k in removed.items()])
+        shift = max(removed.values())
+        self._set_block(al, max(0, self._blk[1] - shift), l, max(0, self._blk[3] - shift))
+
+    def _block_paste(self, text: str) -> None:
+        lines = tm.normalize_paste(text).split("\n")
+        if len(lines) > 1 and lines[-1] == "":
+            lines.pop()                              # trailing line break
+        lines = [ln.replace("\t", " ") for ln in lines]
+        top, bottom, c1, c2 = self.block_rect()
+        rows = self._block_rows()
+        if len(lines) == 1:
+            self._block_replace(lines[0])
+            return
+        n = rows[-1] + 1
+        while len(rows) < len(lines) and n < self.document().blockCount():
+            if self._block(n).isVisible():
+                rows.append(n)                       # extend downwards for more lines
+            n += 1
+        edits = [(row, c1, c2, lines[i] if i < len(lines) else "") for i, row in enumerate(rows)]
+        self._block_edit(edits)
+        last = rows[min(len(rows), len(lines)) - 1]
+        col = c1 + len(lines[min(len(rows), len(lines)) - 1])
+        self._set_block(last, col, last, col)
+
+    def _snap_col(self, line: int, col: int, step: int) -> int:
+        """Keep the column off the inside of "➡️" (two characters)."""
+        text = self._block(line).text()
+        if 0 < col < len(text) and text[col] == "\ufe0f":
+            col += 1 if step > 0 else -1
+        return max(0, col)
+
+    def _visible_neighbour(self, line: int, step: int) -> int:
+        block = self._block(line)
+        nxt = block.next() if step > 0 else block.previous()
+        while nxt.isValid() and not nxt.isVisible():
+            nxt = nxt.next() if step > 0 else nxt.previous()
+        return nxt.blockNumber() if nxt.isValid() else line
+
+    def _column_key(self, e) -> bool:
+        """Keys while column selection is on. True = handled."""
+        key = e.key()
+        mods = e.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        shift = Qt.KeyboardModifier.ShiftModifier
+        nav = (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
+               Qt.Key.Key_Home, Qt.Key.Key_End)
+        if key in nav and mods == shift:
+            if self._blk is None:
+                cur = self.textCursor()
+                ln, cl = cur.blockNumber(), u16_to_cp(cur.block().text(), cur.positionInBlock())
+                self._blk = [ln, cl, ln, cl]
+            al, ac, l, c = self._blk
+            if key == Qt.Key.Key_Left:
+                c = self._snap_col(l, c - 1, -1)
+            elif key == Qt.Key.Key_Right:
+                c = self._snap_col(l, c + 1, 1)
+            elif key == Qt.Key.Key_Up:
+                l = self._visible_neighbour(l, -1)
+            elif key == Qt.Key.Key_Down:
+                l = self._visible_neighbour(l, 1)
+            elif key == Qt.Key.Key_Home:
+                c = 0
+            else:
+                c = len(self._block(l).text())
+            self._set_block(al, ac, l, c)
+            return True
+        if self._blk is None:
+            return False
+        al, ac, l, c = self._blk
+        _t, _b, c1, c2 = self.block_rect()
+        if mods == Qt.KeyboardModifier.NoModifier and key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            if c2 > c1:                               # collapse to the left / right edge
+                col = c1 if key == Qt.Key.Key_Left else c2
+            else:                                     # move every caret
+                col = self._snap_col(l, c1 + (-1 if key == Qt.Key.Key_Left else 1),
+                                     -1 if key == Qt.Key.Key_Left else 1)
+            self._set_block(al, col, l, col)
+            return True
+        if key == Qt.Key.Key_Escape:
+            self._blk = None
+            self.viewport().update()
+            return True
+        if e.matches(QKeySequence.StandardKey.Copy) or e.matches(QKeySequence.StandardKey.Cut):
+            QApplication.clipboard().setText(self._block_text())
+            if e.matches(QKeySequence.StandardKey.Cut) and c2 > c1:
+                self._block_delete(forward=True)
+            return True
+        if mods == Qt.KeyboardModifier.NoModifier and key == Qt.Key.Key_Backspace:
+            self._block_delete(forward=False)
+            return True
+        if mods == Qt.KeyboardModifier.NoModifier and key == Qt.Key.Key_Delete:
+            self._block_delete(forward=True)
+            return True
+        if mods == Qt.KeyboardModifier.NoModifier and key == Qt.Key.Key_Tab:
+            self._block_indent(outdent=False)
+            return True
+        if key == Qt.Key.Key_Backtab:
+            self._block_indent(outdent=True)
+            return True
+        text = e.text()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+        if text and text.isprintable() and (not ctrl or alt) and (not alt or ctrl):
+            self._block_replace(text)                 # (Ctrl+Alt = AltGr on Windows)
+            return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Up, Qt.Key.Key_Down,
+                   Qt.Key.Key_PageUp, Qt.Key.Key_PageDown, Qt.Key.Key_Home, Qt.Key.Key_End) \
+                or e.matches(QKeySequence.StandardKey.SelectAll):
+            self._blk = None                          # back to one normal cursor
+            self.viewport().update()
+        return False
+
+    def _char_w(self) -> float:
+        return QFontMetricsF(self.font()).horizontalAdvance(" ")
+
+    def _col_x(self, block, geo: QRectF, col: int) -> float:
+        text = block.text()
+        layout = block.layout()
+        base = geo.left() + layout.position().x()
+        if layout.lineCount() == 0:
+            return base + col * self._char_w()
+        ln = layout.lineAt(0)
+        if col <= len(text):
+            return base + ln.cursorToX(u16len(text[:col]))[0]
+        return base + ln.cursorToX(u16len(text))[0] + (col - len(text)) * self._char_w()
+
+    def _point_to_linecol(self, pt: QPointF) -> Tuple[int, int]:
+        cur = self.cursorForPosition(pt.toPoint())
+        block = cur.block()
+        text = block.text()
+        col = u16_to_cp(text, cur.positionInBlock())
+        geo = self.blockBoundingGeometry(block).translated(self.contentOffset())
+        end_x = self._col_x(block, geo, len(text))
+        if pt.x() > end_x:
+            col = len(text) + int(round((pt.x() - end_x) / max(1.0, self._char_w())))
+        return block.blockNumber(), col
+
+    def _paint_block(self, e) -> None:
+        top, bottom, c1, c2 = self.block_rect()
+        active_col = self._blk[3]
+        sel = QColor(self.theme.selection)
+        sel.setAlpha(150)
+        caret = QColor(self.theme.fg)
+        p = QPainter(self.viewport())
+        for block, geo in self._painted_blocks(e.rect().top(), e.rect().bottom()):
+            n = block.blockNumber()
+            if n < top or n > bottom:
+                continue
+            x1, x2 = self._col_x(block, geo, c1), self._col_x(block, geo, c2)
+            if x2 > x1:
+                p.fillRect(QRectF(x1, geo.top(), x2 - x1, geo.height()), sel)
+            xc = self._col_x(block, geo, active_col)
+            p.fillRect(QRectF(xc, geo.top() + 1, 1.5, geo.height() - 2), caret)
+        p.end()
+
+    # ---- pasting (multi-line text keeps the tree intact) -------------------
+    def insertFromMimeData(self, source) -> None:
+        if not self._in_drop and source is not None and source.hasText():
+            text = source.text()
+            if self._col_mode and self._blk is not None:
+                self._block_paste(text)
+                return
+            try:
+                if self._smart_paste(text):
+                    return
+            except tm.TreeError as ex:
+                self.statusMessage.emit(str(ex))
+                return
+        super().insertFromMimeData(source)
+
+    def _smart_paste(self, text: str) -> bool:
+        """Paste text copied from PDF / Word / web pages.
+
+        The first line goes where the cursor is; every further line becomes a
+        new branch on the SAME level right below (or, inside an explanation,
+        a further explanation line), so the tree structure below stays intact.
+        Returns False when the normal text paste should be used."""
+        normalized = tm.normalize_paste(text)
+        if "\n" not in normalized:
+            return False                              # ordinary single-line paste
+        if tm.looks_like_tree(text):
+            return False                              # a copied piece of tree: as it is
+        lines = tm.paste_lines(text)
+        first_raw = normalized.replace("\t", " ").replace("\xa0", " ").lstrip(" ")
+        if lines and first_raw.startswith("\n"):
+            lines.insert(0, "")                       # text starts with a line break:
+                                                      # everything goes on new branches
+        elif lines and normalized[:1] in (" ", "\t", "\xa0"):
+            lines[0] = " " + lines[0]                 # keep the space before the 1st word
+        doc = self.document()
+        cur = self.textCursor()
+        if cur.hasSelection() and (doc.findBlock(cur.anchor()).blockNumber()
+                                   != doc.findBlock(cur.position()).blockNumber()):
+            return False                              # selection over several lines
+        if not lines:
+            self.statusMessage.emit("Nothing to paste (only empty lines)")
+            return True
+        if len(lines) == 1:                           # e.g. "text\n" from Word
+            cur.insertText(lines[0] if cur.positionInBlock() else lines[0].lstrip())
+            self.setTextCursor(cur)
+            return True
+        self.ensure_parsed()
+        line = cur.blockNumber()
+        if not (0 <= line < len(self._map)):
+            return False
+        kind, node = self._map.kinds[line], self._map.nodes[line]
+        if node is None or node.parent is None or kind not in (tm.KIND_NODE, tm.KIND_COMMENT,
+                                                               tm.KIND_GAP):
+            return False
+        if cur.hasSelection():                        # replace the selection (same Undo step)
+            cur.removeSelectedText()
+            self.setTextCursor(cur)
+            self._join_next_edit = True
+            self.ensure_parsed()
+            line = cur.blockNumber()
+            kind, node = self._map.kinds[line], self._map.nodes[line]
+            if node is None or node.parent is None:
+                self._join_next_edit = False
+                cur.insertText("\n".join(lines))
+                return True
+        block = cur.block()
+        btext = block.text()
+        col = u16_to_cp(btext, cur.positionInBlock())
+        target = self._paste_target(line, kind, node, btext, col)
+        result: dict = {}
+
+        def op(_n):
+            result.update(self._apply_paste(target, lines))
+            return None, "keep"
+
+        try:
+            if not self.run_op(op, require_node=False):
+                return True
+        finally:
+            self._join_next_edit = False
+        self._cursor_into(result["node"], result["part"], result["offset"])
+        self.statusMessage.emit(f"Pasted {len(lines)} lines - each on its own "
+                                f"{'explanation line' if result['part'] != 'name' else 'branch'}")
+        return True
+
+    def _paste_target(self, line: int, kind: str, node: tm.Node, text: str, col: int):
+        """Where the paste goes: ("name", node, offset) / ("comment", node, k,
+        offset) / ("gap", node)."""
+        if kind == tm.KIND_GAP:
+            return ("gap", node)
+        segs = {part: (s, e) for part, s, e in tm.line_segments(text)}
+        if kind == tm.KIND_COMMENT:
+            k = self._comment_numbers().get(line, 1)
+            cs = segs.get("comment", (len(text), len(text)))[0]
+            if k >= len(node.comment):
+                return ("name", node, len(node.name))
+            return ("comment", node, k, max(0, min(col - cs, len(node.comment[k]))))
+        if "comment" in segs and node.comment:
+            cs = segs["comment"][0]
+            marker = text.rfind("\u27a1", 0, cs)
+            if marker >= 0 and col > marker:
+                return ("comment", node, 0, max(0, min(col - cs, len(node.comment[0]))))
+        ncol = self._map.name_col.get(id(node), 0)
+        return ("name", node, max(0, min(col - ncol, len(node.name))))
+
+    @staticmethod
+    def _apply_paste(target, lines: List[str]) -> dict:
+        kind = target[0]
+        if kind == "comment":
+            _, node, k, off = target
+            head, tail = node.comment[k][:off], node.comment[k][off:]
+            node.comment[k] = head + (lines[0] if head else lines[0].lstrip())
+            for j, extra in enumerate(lines[1:], 1):
+                node.comment.insert(k + j, extra)
+            last = k + len(lines) - 1
+            end = len(node.comment[last])
+            node.comment[last] += tail
+            return {"node": node, "part": ("comment", last), "offset": end}
+        new_nodes = []
+        if kind == "gap" and not lines[0].strip():
+            lines = lines[1:]                         # nothing to merge on an empty line
+        for raw in (lines if kind == "gap" else lines[1:]):
+            name, comment = tm._split_name(raw)
+            new_nodes.append(tm.Node(name, comment))
+        if kind == "gap":
+            owner = target[1]
+            parent, idx = owner.parent, owner.index
+            new_nodes[0].gap_before = max(0, owner.gap_before - 1)   # the line we pasted on
+            owner.gap_before = 0
+            for j, n in enumerate(new_nodes):
+                parent.insert_child(idx + j, n)
+            last = new_nodes[-1]
+            return {"node": last, "part": "name", "offset": len(last.name)}
+        _, node, off = target
+        head, tail = node.name[:off], node.name[off:]
+        name0, comment0 = tm._split_name(lines[0])
+        if head and lines[0][:1] == " " and name0:
+            name0 = " " + name0
+        node.name = head + name0
+        node.comment.extend(comment0)
+        parent, idx = node.parent, node.index
+        for j, n in enumerate(new_nodes, 1):            # same level, right below
+            parent.insert_child(idx + j, n)
+        last = new_nodes[-1]
+        end = len(last.name)
+        last.name += tail
+        return {"node": last, "part": "name", "offset": end}
+
+    def _cursor_into(self, node: tm.Node, part, offset: int) -> None:
+        """Put the text cursor at `offset` inside a node's name or explanation line."""
+        header = self._map.line_of(node)
+        if header is None:
+            return
+        line, k = header, 0
+        if part != "name":
+            k = part[1]
+            if k > 0:
+                seen = 0
+                for i in range(header + 1, len(self._map)):
+                    if self._map.kinds[i] == tm.KIND_COMMENT and self._map.nodes[i] is node:
+                        seen += 1
+                        if seen == k:
+                            line = i
+                            break
+        block = self._block(line)
+        text = block.text()
+        if part == "name":
+            col = self._map.name_col.get(id(node), 0) + offset
+        else:
+            segs = {p: (s, e) for p, s, e in tm.line_segments(text)}
+            col = segs.get("comment", (len(text), len(text)))[0] + offset
+        col = max(0, min(col, len(text)))
+        cur = QTextCursor(block)
+        cur.setPosition(block.position() + u16len(text[:col]))
+        self.setTextCursor(cur)
+        self.ensureCursorVisible()
+
+    def dragEnterEvent(self, e) -> None:
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e) -> None:
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e) -> None:
+        if e.mimeData().hasUrls():
+            for url in e.mimeData().urls():
+                if url.isLocalFile():
+                    self.openFileRequested.emit(url.toLocalFile())
+                    break
+            e.acceptProposedAction()
+        else:
+            self._in_drop = True                  # dragging text keeps Qt's normal behaviour
+            try:
+                super().dropEvent(e)
+            finally:
+                self._in_drop = False
+
+
+# --------------------------------------------------------------------------- #
+# Toolbar icons (drawn as vectors, so they are sharp at any size and theme)
+# --------------------------------------------------------------------------- #
+def _draw_icon(p: QPainter, kind: str) -> None:
+    """Draw a minimal line icon in a 24x24 coordinate space."""
+    def line(*pts) -> None:
+        path = QPainterPath(QPointF(*pts[0]))
+        for pt in pts[1:]:
+            path.lineTo(QPointF(*pt))
+        p.drawPath(path)
+
+    def chevron(y: float, up: bool) -> None:
+        d = -2.5 if up else 2.5
+        line((7, y - d), (12, y + d), (17, y - d))
+
+    def plus(cx: float, cy: float, r: float) -> None:
+        line((cx - r, cy), (cx + r, cy))
+        line((cx, cy - r), (cx, cy + r))
+
+    if kind == "open":
+        line((3, 18.5), (3, 5.5), (9.5, 5.5), (11.5, 7.5), (19, 7.5), (19, 10))
+        line((3, 18.5), (6, 11), (21.5, 11), (18.5, 18.5), (3, 18.5))
+    elif kind == "save":
+        line((12, 3.5), (12, 14.5))
+        line((7.5, 10), (12, 14.5), (16.5, 10))
+        line((4, 15), (4, 20), (20, 20), (20, 15))
+    elif kind in ("collapse_all", "collapse_level", "expand_all", "expand_level"):
+        line((5, 4.5), (19, 4.5))                       # the level we fold into
+        up = kind.startswith("collapse")
+        if kind.endswith("_all"):
+            chevron(11.5, up)
+            chevron(17.5, up)
+        else:
+            chevron(14, up)
+    elif kind == "add_item":
+        line((5, 3), (5, 21))
+        line((5, 12), (10, 12))
+        plus(16.5, 12, 4)
+    elif kind == "add_child":
+        p.drawEllipse(QPointF(6, 5), 2.2, 2.2)          # parent item
+        line((6, 7.5), (6, 15), (11, 15))               # branch into it
+        plus(17, 15, 3.5)
+    elif kind == "spacer":                              # space between two rows
+        line((5, 3), (5, 21))
+        line((5, 5), (11, 5))
+        line((5, 19), (11, 19))
+        line((16, 8), (16, 16))
+        line((13.5, 10.5), (16, 8), (18.5, 10.5))
+        line((13.5, 13.5), (16, 16), (18.5, 13.5))
+    elif kind == "edit":
+        line((15, 4), (20, 9), (9, 20), (4, 20), (4, 15), (15, 4))
+        line((12.5, 6.5), (17.5, 11.5))
+    elif kind == "delete":
+        line((4, 6.5), (20, 6.5))
+        line((9, 6.5), (9, 3.5), (15, 3.5), (15, 6.5))
+        line((6, 6.5), (7, 20.5), (17, 20.5), (18, 6.5))
+        line((10, 10), (10, 17))
+        line((14, 10), (14, 17))
+    elif kind in ("up", "down", "left", "right"):
+        tail, head, wing1, wing2 = {
+            "up": ((12, 20), (12, 4), (6, 10), (18, 10)),
+            "down": ((12, 4), (12, 20), (6, 14), (18, 14)),
+            "left": ((20, 12), (4, 12), (10, 6), (10, 18)),
+            "right": ((4, 12), (20, 12), (14, 6), (14, 18)),
+        }[kind]
+        line(tail, head)
+        line(wing1, head, wing2)
+    elif kind in ("expl_left", "expl_right"):           # explanation column + arrow
+        x0 = 13 if kind == "expl_left" else 3
+        for y in (6, 12, 18):
+            line((x0, y), (x0 + 8, y))
+        if kind == "expl_left":
+            line((10, 12), (3, 12))
+            line((6, 8.5), (2.5, 12), (6, 15.5))
+        else:
+            line((14, 12), (21, 12))
+            line((18, 8.5), (21.5, 12), (18, 15.5))
+    elif kind == "column":                              # rectangle across text lines
+        for y in (5, 12, 19):
+            line((3, y), (21, y))
+        p.save()
+        dash = QPen(p.pen())
+        dash.setDashPattern([1.5, 2.0])
+        p.setPen(dash)
+        p.drawRect(QRectF(8.5, 2.5, 7, 19))
+        p.restore()
+    elif kind == "delete_line":                         # one row crossed out
+        line((4, 4.5), (20, 4.5))
+        line((4, 19.5), (20, 19.5))
+        line((4, 12), (11, 12))
+        line((14.5, 8.5), (21.5, 15.5))
+        line((14.5, 15.5), (21.5, 8.5))
+    elif kind == "format":                              # names + aligned explanations
+        for y, x_end in ((6, 9), (12, 12), (18, 7)):
+            line((4, y), (x_end, y))
+            line((15, y), (20, y))
+
+
+def make_dots_icon(colors: List[str]) -> QIcon:
+    """Filled circles (one per colour) - used for the status marks."""
+    icon = QIcon()
+    for size in (16, 20, 24, 32, 48, 64):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.scale(size / 24.0, size / 24.0)
+        p.setPen(Qt.PenStyle.NoPen)
+        if len(colors) == 1:
+            spots = [(12.0, 12.0, 6.5)]
+        else:
+            spots = [(6.0, 15.5, 3.6), (12.0, 7.5, 3.6), (18.0, 15.5, 3.6)]
+        for (x, y, r), c in zip(spots, colors):
+            p.setBrush(QColor(c))
+            p.drawEllipse(QPointF(x, y), r, r)
+        p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
+def make_mark_icon(kind: str, colors: List[str], neutral: str) -> QIcon:
+    """'line': three full coloured bars (whole name coloured).
+    'words': three text lines where only one word per line is coloured."""
+    icon = QIcon()
+    for size in (16, 20, 24, 32, 48, 64):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.scale(size / 24.0, size / 24.0)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        def bar(x1: float, x2: float, y: float, color: str) -> None:
+            pen = QPen(QColor(color), 3.2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawLine(QPointF(x1, y), QPointF(x2, y))
+
+        rows = (5.5, 12.0, 18.5)
+        if kind == "line":
+            for y, c in zip(rows, colors):
+                bar(3.5, 20.5, y, c)
+        else:
+            layout = ((3.5, 7.0, 10.5, 15.5, 19.0, 20.5),   # grey | colour | grey
+                      (3.5, 3.5, 6.5, 12.5, 16.0, 20.5),
+                      (3.5, 9.5, 13.0, 17.5, 21.0, 21.0))
+            for y, c, (g1, g2, w1, w2, g3, g4) in zip(rows, colors, layout):
+                if g2 > g1:
+                    bar(g1, g2, y, neutral)
+                bar(w1, w2, y, c)
+                if g4 > g3:
+                    bar(g3, g4, y, neutral)
+        p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
+def make_icon(kind: str, color: str) -> QIcon:
+    icon = QIcon()
+    for size in (16, 20, 24, 32, 48, 64):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.scale(size / 24.0, size / 24.0)
+        pen = QPen(QColor(color), 1.8 if size >= 24 else 2.1)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        _draw_icon(p, kind)
+        p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
+def shortcut_text(action: QAction) -> str:
+    seqs = action.shortcuts()
+    if not seqs:
+        return ""
+    text = seqs[0].toString(QKeySequence.SequenceFormat.NativeText)
+    for a, b in (("Return", "Enter"), ("Delete", "Del"), ("Insert", "Ins"), ("Up", "↑"),
+                 ("Down", "↓"), ("Left", "←"), ("Right", "→")):
+        text = text.replace(a, b)
+    return text
+
+
+def _caption_font(base: QFont) -> QFont:
+    f = QFont(base)
+    f.setPointSizeF(max(6.5, base.pointSizeF() - 1.5))
+    return f
+
+
+def _captioned(widget: QWidget, caption: str) -> QWidget:
+    """A toolbar widget with a small shortcut caption underneath."""
+    box = QWidget()
+    lay = QVBoxLayout(box)
+    lay.setContentsMargins(6, 2, 6, 2)
+    lay.setSpacing(3)
+    lay.addStretch()
+    lay.addWidget(widget)
+    label = QLabel(caption)
+    label.setFont(_caption_font(label.font()))
+    label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+    label.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+    lay.addWidget(label)
+    return box
+
+
+class ActionButton(QToolButton):
+    """Toolbar button: icon, name, and its keyboard shortcut underneath."""
+    ICON = 24
+
+    def __init__(self, action: QAction, label: str, caption: Optional[str] = None) -> None:
+        super().__init__()
+        self._label = label
+        self._caption = caption
+        self.setDefaultAction(action)
+        self.setText(label)
+        self.setAutoRaise(True)
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        action.changed.connect(self._on_action_changed)
+
+    def _on_action_changed(self) -> None:
+        self.setText(self._label)        # keep our short label, not the menu text
+        self.updateGeometry()
+        self.update()
+
+    def set_caption(self, caption: Optional[str]) -> None:
+        self._caption = caption
+        self.updateGeometry()
+        self.update()
+
+    def _keys(self) -> str:
+        if self._caption is not None:
+            return self._caption
+        return shortcut_text(self.defaultAction())
+
+    def sizeHint(self) -> QSize:
+        fm = QFontMetrics(self.font())
+        sm = QFontMetrics(_caption_font(self.font()))
+        w = max(fm.horizontalAdvance(self._label), sm.horizontalAdvance(self._keys()),
+                self.ICON) + 12
+        h = 5 + self.ICON + 4 + fm.height() + 1 + sm.height() + 5
+        return QSize(max(w, 52), h)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def paintEvent(self, event) -> None:
+        p = QStylePainter(self)
+        opt = QStyleOptionToolButton()
+        self.initStyleOption(opt)
+        opt.text = ""
+        opt.icon = QIcon()
+        p.drawComplexControl(QStyle.ComplexControl.CC_ToolButton, opt)  # hover/press panel
+
+        enabled = self.isEnabled()
+        group = QPalette.ColorGroup.Active if enabled else QPalette.ColorGroup.Disabled
+        pal = self.palette()
+        r = self.rect()
+        y = 5
+        self.defaultAction().icon().paint(
+            p, QRect((r.width() - self.ICON) // 2, y, self.ICON, self.ICON),
+            Qt.AlignmentFlag.AlignCenter,
+            QIcon.Mode.Normal if enabled else QIcon.Mode.Disabled)
+        y += self.ICON + 4
+        fm = QFontMetrics(self.font())
+        p.setFont(self.font())
+        p.setPen(pal.color(group, QPalette.ColorRole.ButtonText))
+        p.drawText(QRect(0, y, r.width(), fm.height()), Qt.AlignmentFlag.AlignHCenter, self._label)
+        y += fm.height() + 1
+        small = _caption_font(self.font())
+        p.setFont(small)
+        p.setPen(pal.color(group, QPalette.ColorRole.PlaceholderText))
+        p.drawText(QRect(0, y, r.width(), QFontMetrics(small).height()),
+                   Qt.AlignmentFlag.AlignHCenter, self._keys())
+
+
+# --------------------------------------------------------------------------- #
+# Dialogs and find bar
+# --------------------------------------------------------------------------- #
+class FlowLayout(QLayout):
+    """Lays out widgets left to right and wraps to the next row when needed."""
+
+    def __init__(self, parent: Optional[QWidget] = None, hspacing: int = 4,
+                 vspacing: int = 2) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self._h, self._v = hspacing, vspacing
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, i: int):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i: int):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect: QRect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, apply=True)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _do_layout(self, rect: QRect, apply: bool) -> int:
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, row_h = r.x(), r.y(), 0
+        for item in self._items:
+            hint = item.sizeHint()
+            if x + hint.width() > r.right() + 1 and row_h > 0:
+                x, y = r.x(), y + row_h + self._v
+                row_h = 0
+            if apply:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._h
+            row_h = max(row_h, hint.height())
+        return y + row_h - rect.y() + m.bottom()
+
+
+class ColourDialog(QDialog):
+    """Add a colour to the legend, or edit one: its meaning, its colour and its
+    two shortcuts. The command names keep their fixed beginning ("Colour
+    line:" / "Colour word / selection:"); only the meaning after it changes."""
+
+    REMOVE = 2                          # dialog result: "Remove colour" was pressed
+
+    def __init__(self, parent: QWidget, palette: Palette, theme: "Theme",
+                 entry: Optional[ColourEntry] = None, fixed: Optional[str] = None,
+                 taken: Optional[Dict[str, str]] = None) -> None:
+        super().__init__(parent)
+        self.colours, self.theme, self.entry, self.fixed = palette, theme, entry, fixed
+        self.taken = dict(taken or {})            # other commands' shortcuts
+        if fixed == "text":
+            kind, label = "text", palette.text_label
+            override, standard = palette.text_color, theme.file
+            line_key, word_key = palette.text_line_key, palette.text_word_key
+        elif fixed == "explanation":
+            kind, label = "explanation", palette.explanation_label
+            override, standard = palette.explanation_color, theme.comment
+            line_key = word_key = ""
+        elif entry is not None:
+            kind, label = ("builtin" if entry.builtin else "custom"), entry.label
+            override = entry.color
+            standard = ({MARK_CHECKED: theme.mark_checked, MARK_EXPLORE: theme.mark_explore,
+                         MARK_PROBLEM: theme.mark_problem}[entry.mark] if entry.builtin else None)
+            line_key, word_key = entry.line_key, entry.word_key
+        else:
+            kind, label = "new", ""
+            override, standard = palette.suggest_colour(), None
+            line_key, word_key = palette.suggest_keys(self.taken)
+        self.kind, self.standard, self.override = kind, standard, override
+        self.setWindowTitle({"new": "Add colour"}.get(kind, "Edit colour"))
+        self.setMinimumWidth(620)
+        form = QFormLayout(self)
+        self.meaning = QLineEdit(label)
+        self.meaning.setMaxLength(LABEL_MAX)
+        self.meaning.setPlaceholderText("What does this colour mean? e.g. Same on both robots")
+        form.addRow("Meaning", self.meaning)
+
+        self.color_btn = QPushButton()
+        self.color_btn.clicked.connect(self._pick)
+        self.standard_btn = QPushButton("Standard")
+        self.standard_btn.setToolTip("Back to the standard colour (follows the light / dark theme)")
+        self.standard_btn.clicked.connect(self.reset_colour)
+        self.standard_btn.setVisible(standard is not None)
+        self.color_note = QLabel()
+        self.color_note.setStyleSheet("color: palette(placeholder-text);")
+        row = QHBoxLayout()
+        row.addWidget(self.color_btn)
+        row.addWidget(self.standard_btn)
+        row.addWidget(self.color_note, 1)
+        form.addRow("Colour", row)
+
+        self.line_edit = self._key_edit(line_key)
+        self.word_edit = self._key_edit(word_key)
+        if kind == "explanation":
+            info = QLabel("Explanations can't be coloured with a command, so they have no "
+                          "shortcuts.")
+            info.setWordWrap(True)
+            info.setStyleSheet("color: palette(placeholder-text);")
+            form.addRow("Shortcuts", info)
+        else:
+            what = ("Default colour (whole name)", "Default colour (word / selection)") \
+                if kind == "text" else ("Colour line (whole name)", "Colour word / selection")
+            form.addRow(f"Shortcut – {what[0]}", self._key_row(self.line_edit))
+            form.addRow(f"Shortcut – {what[1]}", self._key_row(self.word_edit))
+            self.commands = QLabel()
+            self.commands.setStyleSheet("color: palette(placeholder-text);")
+            self.commands.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            form.addRow("Commands", self.commands)
+
+        self.preview = QLabel()
+        font = parent.editor.font() if hasattr(parent, "editor") else self.font()
+        self.preview.setFont(font)
+        self.preview.setContentsMargins(8, 6, 8, 6)
+        form.addRow("Preview", self.preview)
+        self.error = QLabel()
+        self.error.setStyleSheet(f"color: {theme.mark_problem};")
+        self.error.setWordWrap(True)
+        form.addRow(self.error)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        if kind == "custom":
+            rm = buttons.addButton("Remove colour…", QDialogButtonBox.ButtonRole.DestructiveRole)
+            rm.clicked.connect(lambda: self.done(self.REMOVE))
+        form.addRow(buttons)
+        self.meaning.textChanged.connect(self._refresh)
+        self._refresh()
+        self.adjustSize()
+        self.meaning.setFocus()
+        self.meaning.selectAll()
+
+    # -- widgets -------------------------------------------------------------
+    def _key_edit(self, portable: str):
+        edit = QKeySequenceEdit(QKeySequence.fromString(portable,
+                                                        QKeySequence.SequenceFormat.PortableText))
+        if hasattr(edit, "setMaximumSequenceLength"):
+            edit.setMaximumSequenceLength(1)
+        edit.keySequenceChanged.connect(lambda _s: self._refresh())
+        return edit
+
+    def _key_row(self, edit) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(edit, 1)
+        clear = QPushButton("None")
+        clear.setToolTip("No shortcut for this command")
+        clear.clicked.connect(edit.clear)
+        row.addWidget(clear)
+        return row
+
+    def effective_colour(self) -> str:
+        return self.override or self.standard
+
+    def _refresh(self) -> None:
+        color = self.effective_colour()
+        self.color_btn.setText(f"  {color}")
+        self.color_btn.setIcon(make_dots_icon([color]))
+        if self.standard is not None:
+            self.color_note.setText("Standard colour" if self.override is None else "Own colour")
+            self.color_note.setToolTip("The standard colour follows the light / dark theme; an "
+                                       "own colour is used in both.")
+            self.standard_btn.setEnabled(self.override is not None)
+        sample = self.meaning.text().strip() or "example name"
+        self.preview.setText(sample)
+        self.preview.setStyleSheet(f"background: {self.theme.bg}; color: {color}; "
+                                   "border-radius: 4px;")
+        if hasattr(self, "commands"):
+            meaning = " ".join(self.meaning.text().split()) or "…"
+            if self.kind == "text":
+                names = ("Default colour (remove mark)", "Default colour for word / selection")
+            else:
+                names = (f"Colour line: {meaning}", f"Colour word / selection: {meaning}")
+            keys = [native_keys(k) or "no shortcut" for k in self.keys()]
+            self.commands.setText(f"{names[0]}  ({keys[0]})\n{names[1]}  ({keys[1]})")
+        self.error.setText("")
+
+    def _pick(self) -> None:
+        c = QColorDialog.getColor(QColor(self.effective_colour()), self, "Choose a colour")
+        if c.isValid():
+            self.set_colour(c.name())
+
+    def set_colour(self, color: str) -> None:
+        self.override = QColor(color).name()
+        self._refresh()
+
+    def reset_colour(self) -> None:
+        if self.standard is not None:
+            self.override = None
+            self._refresh()
+
+    def set_keys(self, line: str, word: str) -> None:
+        for edit, k in ((self.line_edit, line), (self.word_edit, word)):
+            edit.setKeySequence(QKeySequence.fromString(k, QKeySequence.SequenceFormat.PortableText))
+        self._refresh()
+
+    def keys(self) -> Tuple[str, str]:
+        if self.kind == "explanation":
+            return "", ""
+        return normalize_keys(self.line_edit.keySequence()), normalize_keys(self.word_edit.keySequence())
+
+    def values(self) -> Tuple[str, Optional[str], str, str]:
+        """(meaning, colour or None for the standard colour, line key, word key)"""
+        return (" ".join(self.meaning.text().split()), self.override, *self.keys())
+
+    # -- checks --------------------------------------------------------------
+    def validate(self) -> Optional[str]:
+        """Error message, or None when the input can be used."""
+        label, _override, line, word = self.values()
+        color = self.effective_colour()
+        if not label:
+            return "Please describe what this colour means."
+        own = self.entry.key if self.entry is not None else self.fixed
+        pal, t = self.colours, self.theme
+        rows = [("text", pal.text_label, pal.text_colour(t)),
+                ("explanation", pal.explanation_label, pal.explanation_colour(t))]
+        rows += [(e.key, e.label, pal.colour(e.mark, t)) for e in pal.entries]
+        for key, other, _c in rows:
+            if key != own and other.casefold() == label.casefold():
+                return f"“{other}” is already in the legend - please use another meaning."
+        taken = {QColor(t.folder).name(): "folder names", QColor(t.guide).name(): "the tree lines"}
+        for key, other, c in rows:
+            if key != own:
+                taken[QColor(c).name()] = other
+        if QColor(color).name() in taken:
+            return (f"This colour is already used for “{taken[QColor(color).name()]}” - "
+                    "please choose a different one.")
+        if line and line == word:
+            return "The two commands need different shortcuts."
+        used = {**self.taken, **pal.keys_in_use(exclude=own)}
+        for k in (line, word):
+            problem = keys_problem(k)
+            if problem:
+                return problem
+            if k in used:
+                return f"“{native_keys(k)}” is already used for “{used[k]}” - choose another one."
+        return None
+
+    def accept(self) -> None:
+        err = self.validate()
+        if err:
+            self.error.setText(err)
+            return
+        super().accept()
+
+
+class LegendBar(QWidget):
+    """Always-visible legend: every colour and what it means. Click a colour
+    for its commands; add, edit, remove colours and save them as default."""
+
+    def __init__(self, window: "MainWindow") -> None:
+        super().__init__()
+        self.window_ = window
+        self.setObjectName("legend_bar")
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self.flow = FlowLayout(self, hspacing=2, vspacing=0)
+        self.flow.setContentsMargins(8, 2, 8, 2)
+        self.chips: List[QToolButton] = []
+
+    def rebuild(self) -> None:
+        while self.flow.count():
+            item = self.flow.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self.chips = []
+        w = self.window_
+        pal, theme = w.editor.colours, w.editor.theme
+        title = QLabel("Legend:")
+        title.setStyleSheet("color: palette(placeholder-text);")
+        self.flow.addWidget(title)
+        hint = "Click for commands, to edit the meaning, colour and shortcuts"
+        keys = w.colour_shortcut_text("text")
+        self._chip("text", pal.text_label, pal.text_colour(theme),
+                   f"{pal.text_label} - the default text colour.\n"
+                   + (f"Back to this colour: {keys}\n" if keys else "") + hint + ".")
+        for e in pal.entries:
+            keys = w.colour_shortcut_text(e.key)
+            self._chip(e.key, e.label, pal.colour(e.mark, theme),
+                       f"{e.label}\n" + (f"{keys}\n" if keys else "")
+                       + hint + (" or to remove it." if not e.builtin else "."))
+        self._chip("explanation", pal.explanation_label, pal.explanation_colour(theme),
+                   f"{pal.explanation_label} - colour of every explanation (➡️); it can't be "
+                   "coloured with a command.\nClick to edit the meaning or the colour.")
+        gap = QLabel()
+        gap.setFixedWidth(10)
+        self.flow.addWidget(gap)
+        for text, tip, slot in (("+ Add colour", "Add an own colour with its meaning",
+                                 w.add_colour),
+                                ("Edit legend…", "Edit, remove and add colours, meanings and "
+                                 "shortcuts", w.open_legend_dialog),
+                                ("Save as default", "Use this legend for every new tree "
+                                 f"(saved in {default_colours_path()})", w.save_default_colours),
+                                ("Load default", "Add the colours of the saved default legend "
+                                 "to this tree", w.load_default_colours)):
+            b = QToolButton()
+            b.setText(text)
+            b.setToolTip(tip)
+            b.setAutoRaise(False)                    # framed: commands, not colours
+            b.clicked.connect(slot)
+            b.setObjectName("legend_" + text.strip("+ .…").lower().replace(" ", "_"))
+            self.flow.addWidget(b)
+        self.flow.invalidate()
+        self.updateGeometry()
+
+    def _chip(self, key: str, label: str, color: str, tip: str) -> QToolButton:
+        chip = QToolButton()
+        chip.setText(label.replace("&", "&&"))
+        chip.setIcon(make_dots_icon([color]))
+        chip.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        chip.setAutoRaise(True)
+        chip.setToolTip(tip)
+        chip.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        chip.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
+        chip.setMenu(self.window_.legend_menu(key, chip))
+        chip.legend_key = key
+        chip.legend_label = label
+        chip.legend_color = QColor(color).name()
+        self.flow.addWidget(chip)
+        self.chips.append(chip)
+        return chip
+
+    def chip(self, key: str) -> Optional[QToolButton]:
+        return next((c for c in self.chips if c.legend_key == key), None)
+
+
+class LegendDialog(QDialog):
+    """All colours of the legend in one list: add, edit, remove."""
+
+    def __init__(self, window: "MainWindow") -> None:
+        super().__init__(window)
+        self.window_ = window
+        self.setWindowTitle("Colour legend")
+        self.setMinimumSize(700, 380)
+        lay = QVBoxLayout(self)
+        info = QLabel("Every colour with its meaning and shortcuts. Double-click a colour to "
+                      "edit its meaning, colour and shortcuts.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(lambda _i: self.edit())
+        self.list.currentRowChanged.connect(lambda _r: self._update_buttons())
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        self.add_btn = QPushButton("+ Add colour…")
+        self.edit_btn = QPushButton("Edit…")
+        self.remove_btn = QPushButton("Remove")
+        self.default_btn = QPushButton("Save as default")
+        self.default_btn.setToolTip(f"Use this legend for every new tree ({default_colours_path()})")
+        close = QPushButton("Close")
+        for b, slot in ((self.add_btn, self.add), (self.edit_btn, self.edit),
+                        (self.remove_btn, self.remove), (self.default_btn, window.save_default_colours),
+                        (close, self.accept)):
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        row.insertStretch(4, 1)
+        lay.addLayout(row)
+        self.refresh()
+
+    def refresh(self, select: Optional[str] = None) -> None:
+        w = self.window_
+        pal, theme = w.editor.colours, w.editor.theme
+        current = select or self.current_key()
+        self.list.clear()
+        rows = [("text", pal.text_label, pal.text_colour(theme))]
+        rows += [(e.key, e.label, pal.colour(e.mark, theme)) for e in pal.entries]
+        rows += [("explanation", pal.explanation_label, pal.explanation_colour(theme))]
+        for key, label, color in rows:
+            keys = (w.colour_shortcut_text(key) if key != "explanation"
+                    else "colour of every explanation (➡️) - no shortcuts")
+            item = QListWidgetItem(make_dots_icon([color]), f"{label}      {keys}".rstrip())
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            self.list.addItem(item)
+            if key == current:
+                self.list.setCurrentItem(item)
+        if self.list.currentRow() < 0:
+            self.list.setCurrentRow(0)
+        self._update_buttons()
+
+    def current_key(self) -> Optional[str]:
+        item = self.list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def _update_buttons(self) -> None:
+        key = self.current_key()
+        e = self.window_.editor.colours.by_key(key) if key else None
+        self.edit_btn.setEnabled(key is not None)
+        self.remove_btn.setEnabled(e is not None and not e.builtin)
+        self.remove_btn.setToolTip("" if e is not None and not e.builtin else
+                                   "Only own colours can be removed")
+
+    def add(self) -> None:
+        before = {e.key for e in self.window_.editor.colours.entries}
+        self.window_.add_colour()
+        new = [e.key for e in self.window_.editor.colours.entries if e.key not in before]
+        self.refresh(new[0] if new else None)
+
+    def edit(self) -> None:
+        key = self.current_key()
+        if key:
+            self.window_.edit_colour(key)
+            self.refresh(key if key in ("text", "explanation") or
+                         self.window_.editor.colours.by_key(key) else None)
+
+    def remove(self) -> None:
+        key = self.current_key()
+        if key:
+            self.window_.remove_colour(key)
+            self.refresh()
+
+
+class EditNodeDialog(QDialog):
+    def __init__(self, parent: QWidget, node: tm.Node, font: QFont,
+                 focus_explanation: bool) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit branch")
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+        path = QLabel(" › ".join(p or "(empty)" for p in node.path()))
+        path.setWordWrap(True)
+        path.setStyleSheet("color: palette(placeholder-text);")
+        lay.addWidget(path)
+        form = QFormLayout()
+        self.name = QLineEdit(node.name)
+        self.name.setFont(font)
+        self.name.setPlaceholderText("folder/ or file.ext")
+        self.explanation = QPlainTextEdit("\n".join(node.comment))
+        self.explanation.setFont(font)
+        self.explanation.setPlaceholderText(
+            "What is this for? Each line becomes a ➡️ line in the file.")
+        self.explanation.setMinimumHeight(140)
+        form.addRow("Name", self.name)
+        form.addRow("Explanation", self.explanation)
+        lay.addLayout(form)
+        hint = QLabel("Ctrl+Enter to save")
+        hint.setStyleSheet("color: palette(placeholder-text);")
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        row = QHBoxLayout()
+        row.addWidget(hint)
+        row.addStretch()
+        row.addWidget(buttons)
+        lay.addLayout(row)
+        save = QAction(self)
+        save.setShortcuts([QKeySequence("Ctrl+Return"), QKeySequence("Ctrl+Enter")])
+        save.triggered.connect(self.accept)
+        self.addAction(save)
+        if focus_explanation:
+            self.explanation.setFocus()
+            self.explanation.moveCursor(QTextCursor.MoveOperation.End)
+        else:
+            self.name.setFocus()
+            self.name.selectAll()
+
+    def values(self) -> Tuple[str, List[str]]:
+        name = " ".join(self.name.text().split())
+        lines = [l.rstrip() for l in self.explanation.toPlainText().split("\n")]
+        while lines and not lines[-1]:
+            lines.pop()
+        while lines and not lines[0]:
+            lines.pop(0)
+        return name, lines
+
+    def accept(self) -> None:
+        name, _ = self.values()
+        if tm.marker_at(name) or re.search(r"\s\u27a1", name):
+            QMessageBox.warning(self, "Invalid name",
+                                "A name can't start with ➡️ or contain ' ➡️' - "
+                                "that marks the start of the explanation.\n"
+                                "Put that text in the Explanation box instead.")
+            return
+        super().accept()
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent: QWidget, opts: tm.FormatOptions, format_on_save: bool) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        form = QFormLayout(self)
+        self.min_col = QSpinBox()
+        self.min_col.setRange(0, 300)
+        self.min_col.setValue(opts.min_comment_column)
+        self.gap = QSpinBox()
+        self.gap.setRange(1, 40)
+        self.gap.setValue(opts.comment_gap)
+        self.on_save = QCheckBox("Tidy the tree lines every time it is saved (explanation columns are kept)")
+        self.on_save.setChecked(format_on_save)
+        form.addRow("Explanation ➡️ column (minimum)", self.min_col)
+        form.addRow("Spaces between longest name and ➡️", self.gap)
+        form.addRow(self.on_save)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+
+class FindBar(QWidget):
+    def __init__(self, editor: TreeEditor) -> None:
+        super().__init__()
+        self.editor = editor
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 4)
+        self.field = QLineEdit()
+        self.field.setPlaceholderText("Find in tree (folded branches open automatically)")
+        self.field.returnPressed.connect(self.find_next)
+        self.case = QCheckBox("Match case")
+        self.info = QLabel()
+        prev_btn, next_btn, close_btn = QToolButton(), QToolButton(), QToolButton()
+        prev_btn.setText("▲")
+        prev_btn.setToolTip("Previous (Shift+F3)")
+        next_btn.setText("▼")
+        next_btn.setToolTip("Next (F3)")
+        close_btn.setText("✕")
+        close_btn.setToolTip("Close (Esc)")
+        prev_btn.clicked.connect(self.find_prev)
+        next_btn.clicked.connect(self.find_next)
+        close_btn.clicked.connect(self.close_bar)
+        for w in (self.field, prev_btn, next_btn, self.case, self.info):
+            lay.addWidget(w)
+        lay.addStretch()
+        lay.addWidget(close_btn)
+        self.hide()
+
+    def open_bar(self) -> None:
+        sel = self.editor.textCursor().selectedText()
+        if sel and "\u2029" not in sel:
+            self.field.setText(sel)
+        self.show()
+        self.field.setFocus()
+        self.field.selectAll()
+
+    def close_bar(self) -> None:
+        self.hide()
+        self.editor.setFocus()
+
+    def keyPressEvent(self, e) -> None:
+        if e.key() == Qt.Key.Key_Escape:
+            self.close_bar()
+        else:
+            super().keyPressEvent(e)
+
+    def find_next(self) -> None:
+        self._find(backward=False)
+
+    def find_prev(self) -> None:
+        self._find(backward=True)
+
+    def _find(self, backward: bool) -> None:
+        text = self.field.text()
+        if not text:
+            if self.isHidden():
+                self.open_bar()
+            return
+        from PySide6.QtGui import QTextDocument
+        flags = QTextDocument.FindFlag(0)
+        if backward:
+            flags |= QTextDocument.FindFlag.FindBackward
+        if self.case.isChecked():
+            flags |= QTextDocument.FindFlag.FindCaseSensitively
+        doc = self.editor.document()
+        found = doc.find(text, self.editor.textCursor(), flags)
+        if found.isNull():
+            start = QTextCursor(doc)
+            if backward:
+                start.movePosition(QTextCursor.MoveOperation.End)
+            found = doc.find(text, start, flags)
+            self.info.setText("Wrapped around" if not found.isNull() else "")
+        else:
+            self.info.setText("")
+        if found.isNull():
+            self.info.setText("Not found")
+            return
+        self.editor.reveal_line(found.blockNumber())
+        self.editor.setTextCursor(found)
+        self.editor.centerCursor()
+
+
+# --------------------------------------------------------------------------- #
+# Main window
+# --------------------------------------------------------------------------- #
+class MainWindow(QMainWindow):
+    MAX_RECENT = 10
+
+    def __init__(self, path: Optional[str] = None) -> None:
+        super().__init__()
+        self.settings = QSettings("Nodeon", "Nodeon")
+        _migrate_old_settings(self.settings)
+        self.path: Optional[str] = None
+        self.newline = "\n"
+        self.custom_line_actions: Dict[str, QAction] = {}
+        self.custom_word_actions: Dict[str, QAction] = {}
+        self._default_colours_warning = ""
+        self.default_palette = self._read_default_colours()
+
+        self.editor = TreeEditor()
+        self.findbar = FindBar(self.editor)
+        self.legend = LegendBar(self)
+        tree_side = QWidget()
+        lay = QVBoxLayout(tree_side)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self.editor)
+        lay.addWidget(self.legend)
+        lay.addWidget(self.findbar)
+        # Right-hand side: pictures and features of the item at the cursor.
+        self.item_store = idt.ItemStore()
+        self.details_panel = idt.ItemPanel(lambda: self.editor.details, self.item_store)
+        self.details_panel.last_dir = str(self.settings.value("image_dir", "") or "")
+        # In a scroll area: the panel never makes the window wider than before
+        # (a very narrow panel scrolls instead).
+        self.details_area = QScrollArea()
+        self.details_area.setObjectName("details_area")
+        self.details_area.setWidget(self.details_panel)
+        self.details_area.setWidgetResizable(True)
+        self.details_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.details_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setObjectName("main_splitter")
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(tree_side)
+        self.main_splitter.addWidget(self.details_area)
+        self.main_splitter.setStretchFactor(0, 1)      # the tree gets extra width,
+        self.main_splitter.setStretchFactor(1, 0)      # the panel keeps its own
+        self.setCentralWidget(self.main_splitter)
+        self._details_timer = QTimer(self)
+        self._details_timer.setSingleShot(True)
+        self._details_timer.setInterval(40)
+        self._details_timer.timeout.connect(self._sync_details_panel)
+
+        self.editor.options = tm.FormatOptions(
+            int(self.settings.value("min_comment_column", 34)),
+            int(self.settings.value("comment_gap", 3)))
+        self.format_on_save = self.settings.value("format_on_save", True, type=bool)
+        ui_version = int(self.settings.value("ui_version", 0) or 0)
+        font_size = float(self.settings.value("font_size", DEFAULT_FONT_SIZE))
+        if ui_version < UI_VERSION and font_size < DEFAULT_FONT_SIZE:
+            font_size = DEFAULT_FONT_SIZE          # one-time upgrade to the larger default
+        self.editor.set_font_size(font_size)
+
+        self._build_actions()
+        self._build_menus()
+        self._build_toolbar()
+        self._build_statusbar()
+
+        self.editor.statusMessage.connect(lambda m: self.statusBar().showMessage(m, 4000))
+        self.editor.foldsChanged.connect(self._update_level_display)
+        self.editor.cursorPositionChanged.connect(self._update_position)
+        self.editor.openFileRequested.connect(self._open_dropped)
+        self.editor.marksChanged.connect(self._marks_changed)
+        self.editor.columnModeChanged.connect(self._column_mode_changed)
+        self.editor.document().modificationChanged.connect(self.setWindowModified)
+        # Keys can change on every re-read of the text: follow them at once.
+        self.editor.foldsChanged.connect(self._sync_details_panel)
+        self.editor.cursorPositionChanged.connect(self._details_timer.start)
+        self.details_panel.detailsChanged.connect(self._details_changed)
+        self.details_panel.statusMessage.connect(
+            lambda m: self.statusBar().showMessage(m, 5000))
+
+        dark = self.settings.value("dark", None)
+        if dark is None:
+            dark = QApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
+        self._set_dark(dark in (True, "true"), save=False)
+
+        geo = self.settings.value("geometry")
+        self._needs_default_geometry = geo is None or ui_version < UI_VERSION
+        if not self._needs_default_geometry:
+            self.restoreGeometry(geo)
+        else:
+            avail = QApplication.primaryScreen().availableGeometry()
+            self.resize(max(avail.width() // 2, 400), avail.height())
+        self.settings.setValue("ui_version", UI_VERSION)
+
+        show_legend = self.settings.value("show_legend", True, type=bool)
+        self.legend.setVisible(show_legend)
+        self.a_legend.setChecked(show_legend)
+
+        show_details = self.settings.value("show_details", True, type=bool)
+        self.details_area.setVisible(show_details)
+        self.a_details.setChecked(show_details)
+        state = self.settings.value("details_splitter")
+        # Until the user drags the divider, the panel keeps its default width.
+        self._details_default_width = state is None or not self.main_splitter.restoreState(state)
+        self.main_splitter.splitterMoved.connect(self._details_width_chosen)
+        state = self.settings.value("details_sections")
+        if state is not None and self.details_panel.splitter.restoreState(state):
+            self.details_panel.sections_restored = True
+
+        if not (path and self.load_file(path)):
+            self.new_file(ask=False)
+        if self._default_colours_warning:
+            self.statusBar().showMessage(self._default_colours_warning, 10000)
+
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        if self._needs_default_geometry:
+            self._needs_default_geometry = False
+            QTimer.singleShot(0, self._apply_default_geometry)
+        if self._details_default_width:
+            QTimer.singleShot(0, self._apply_default_details_width)
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        if getattr(self, "_details_default_width", False):
+            QTimer.singleShot(0, self._apply_default_details_width)
+
+    def _details_width_chosen(self, *_args) -> None:
+        self._details_default_width = False
+
+    def _apply_default_details_width(self) -> None:
+        """Default: the item panel is about 360 px wide (at most 40 % of a
+        narrow window), the tree gets the rest."""
+        if not self._details_default_width or not self.details_area.isVisible():
+            return
+        total = self.main_splitter.width() - self.main_splitter.handleWidth()
+        if total > 0:
+            panel = min(360, total * 2 // 5)
+            self.main_splitter.setSizes([total - panel, panel])
+
+    def _apply_default_geometry(self) -> None:
+        """First start: full screen height, half the screen width, centered."""
+        screen = self.screen() or QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        frame = self.frameGeometry()
+        extra_w = max(0, frame.width() - self.width())
+        extra_h = max(0, frame.height() - self.height())
+        w = avail.width() // 2
+        self.resize(max(w - extra_w, self.minimumSizeHint().width()), avail.height() - extra_h)
+        self.move(avail.x() + (avail.width() - self.frameGeometry().width()) // 2, avail.y())
+
+    # ---- actions ---------------------------------------------------------
+    def _act(self, text: str, slot, shortcut=None, tip: str = "") -> QAction:
+        a = QAction(text, self)
+        if shortcut:
+            seqs = shortcut if isinstance(shortcut, (list, tuple)) else [shortcut]
+            unique: List[QKeySequence] = []
+            for s in seqs:
+                for k in QKeySequence.keyBindings(s) if isinstance(s, QKeySequence.StandardKey) \
+                        else [QKeySequence(s)]:
+                    if k not in unique:
+                        unique.append(k)
+            a.setShortcuts(unique)
+        keys = ", ".join(s.toString(QKeySequence.SequenceFormat.NativeText) for s in a.shortcuts())
+        a.setToolTip(f"{tip or text.replace('&', '')}" + (f"  ({keys})" if keys else ""))
+        a.setStatusTip(tip or text.replace("&", ""))
+        a.triggered.connect(slot)
+        self.addAction(a)
+        return a
+
+    def _build_actions(self) -> None:
+        e = self.editor
+        A = self._act
+        self.a_new = A("&New", lambda: self.new_file(), QKeySequence.StandardKey.New)
+        self.a_open = A("&Open…", self.open_dialog, QKeySequence.StandardKey.Open)
+        self.a_save = A("&Save", self.save, QKeySequence.StandardKey.Save)
+        self.a_save_as = A("Save &As…", self.save_as, "Ctrl+Shift+S")
+        self.a_quit = A("E&xit", self.close)          # Ctrl+Q is "Delete line"
+
+        self.a_undo = A("&Undo", e.undo, QKeySequence.StandardKey.Undo)
+        self.a_redo = A("&Redo", e.redo, [QKeySequence.StandardKey.Redo, "Ctrl+Y"])
+        self.a_find = A("&Find…", self.findbar.open_bar, QKeySequence.StandardKey.Find)
+        self.a_find_next = A("Find &next", self.findbar.find_next, "F3")
+        self.a_find_prev = A("Find &previous", self.findbar.find_prev, "Shift+F3")
+        self.a_column = A("Column selection", lambda c: e.set_column_mode(bool(c)),
+                          "Alt+Shift+Insert",
+                          "Column selection: select a rectangle over several lines (Shift+arrows "
+                          "or drag) and type, Tab / Shift+Tab, Backspace, copy or paste on all of "
+                          "them at once. Press again for normal line selection.")
+        self.a_column.setCheckable(True)
+
+        self.a_collapse_all = A("Collapse all", e.collapse_all, "Alt+1",
+                                "Collapse every branch")
+        self.a_collapse_level = A("Collapse one level", e.collapse_one_level, "Alt+2",
+                                  "Hide the deepest visible level in the whole document")
+        self.a_expand_level = A("Expand one level", e.expand_one_level, "Alt+3",
+                                "Show one more level in the whole document")
+        self.a_expand_all = A("Expand all", e.expand_all, "Alt+4", "Expand every branch")
+        self.a_toggle = A("Toggle branch", e.toggle_current, "Ctrl+.",
+                          "Collapse / expand the branch at the cursor")
+        self.a_collapse_branch = A("Collapse branch fully", e.collapse_branch_fully,
+                                   "Ctrl+Shift+.", "Collapse this branch and everything inside it")
+        self.a_expand_branch = A("Expand branch fully", e.expand_branch_fully, "Ctrl+Shift+,",
+                                 "Expand this branch and everything inside it")
+        self.level_actions = []
+        for n in range(1, 10):
+            self.level_actions.append(
+                A(f"Show {n} level{'s' if n > 1 else ''}",
+                  lambda _=False, n=n: e.show_to_level(n), f"Ctrl+{n}"))
+
+        self.a_add_sibling = A("Add item below", e.add_sibling,
+                               ["Ctrl+Return", "Ctrl+Enter"], "New item on the same level")
+        self.a_spacer = A("Insert empty line", e.insert_spacer, ["Alt+Return", "Alt+Enter"],
+                          "Insert an empty line below (vertical branch lines are kept)")
+        self.a_add_child = A("Add sub-item", e.add_child,
+                             ["Ctrl+Shift+Return", "Ctrl+Shift+Enter"], "New item inside this one")
+        self.a_edit = A("Edit name && explanation…", lambda: e.edit_current(), EDIT_SHORTCUT,
+                        "Explanation – add or edit the explanation (and the name)")
+        self.a_explain = A("Edit explanation…", lambda: e.edit_current(True), "Ctrl+E")
+        self.a_duplicate = A("Duplicate branch", e.duplicate, "Ctrl+D")
+        self.a_delete = A("Delete branch", e.delete_branch, "Ctrl+Shift+Delete",
+                          "Delete the item and everything inside it")
+        self.a_delete_line = A("Delete line", e.delete_line, "Ctrl+Q",
+                               "Delete only this row - sub-items stay and move up one level")
+        self.a_up = A("Move up", e.move_up, "Alt+Shift+Up")
+        self.a_down = A("Move down", e.move_down, "Alt+Shift+Down")
+        self.a_left = A("Move left (outdent)", e.outdent, "Alt+Shift+Left",
+                        "One level up in the tree (also Shift+Tab)")
+        self.a_right = A("Move right (indent)", e.indent, "Alt+Shift+Right",
+                         "Into the item above (also Tab)")
+        self.a_format = A("Format document", lambda: e.format_document(), "Ctrl+Alt+L",
+                          "Re-draw all lines and align every explanation")
+        self.a_expl_left = A("Move explanations left", lambda: e.shift_explanations(-1),
+                             "Alt+Left", "Move explanations (➡️) left - selected lines, or the "
+                             "whole document if nothing is selected")
+        self.a_expl_right = A("Move explanations right", lambda: e.shift_explanations(1),
+                              "Alt+Right", "Move explanations (➡️) right - selected lines, or the "
+                              "whole document if nothing is selected")
+        self.a_mark_checked = A("Colour line: Accepted", lambda: e.mark_selection(MARK_CHECKED),
+                                "Alt+G")
+        self.a_mark_explore = A("Colour line: To be approved",
+                                lambda: e.mark_selection(MARK_EXPLORE), "Alt+O")
+        self.a_mark_problem = A("Colour line: Rejected", lambda: e.mark_selection(MARK_PROBLEM),
+                                "Alt+R")
+        self.a_mark_clear = A("Default colour (remove mark)", lambda: e.mark_selection(MARK_NONE),
+                              "Alt+C", "Give the whole name its default text colour again")
+        self.a_word_checked = A("Colour word / selection: Accepted",
+                                lambda: e.mark_words(MARK_CHECKED), "Alt+Shift+G")
+        self.a_word_explore = A("Colour word / selection: To be approved",
+                                lambda: e.mark_words(MARK_EXPLORE), "Alt+Shift+O")
+        self.a_word_problem = A("Colour word / selection: Rejected",
+                                lambda: e.mark_words(MARK_PROBLEM), "Alt+Shift+R")
+        self.a_word_clear = A("Default colour for word / selection",
+                              lambda: e.mark_words(MARK_NONE), "Alt+Shift+C",
+                              "Give the word at the cursor (or the selected characters) "
+                              "the default text colour again")
+        self.mark_actions = [self.a_mark_checked, self.a_mark_explore, self.a_mark_problem,
+                             self.a_mark_clear]
+        self.word_actions = [self.a_word_checked, self.a_word_explore, self.a_word_problem,
+                             self.a_word_clear]
+        self.builtin_line_actions = {"checked": self.a_mark_checked,
+                                     "explore": self.a_mark_explore,
+                                     "problem": self.a_mark_problem}
+        self.builtin_word_actions = {"checked": self.a_word_checked,
+                                     "explore": self.a_word_explore,
+                                     "problem": self.a_word_problem}
+        self.a_mark_menu = QAction("Mark line", self)
+        self.a_words_menu = QAction("Mark words", self)
+        self.a_add_colour = A("Add colour to the legend…", self.add_colour, None,
+                              "Add an own colour with its meaning (e.g. same on both robots)")
+        self.a_edit_legend = A("Edit legend…", self.open_legend_dialog, None,
+                               "Edit, remove and add colours - meanings, colours and shortcuts")
+        self.a_save_colours = A("Save legend as default", self.save_default_colours, None,
+                                "Use this legend (all colours and meanings) for every new tree")
+        self.a_load_colours = A("Load default legend", self.load_default_colours, None,
+                                "Add the colours of the saved default legend to this tree")
+        self.a_legend = A("Show colour legend", self._toggle_legend, None,
+                          "Show the legend that explains every colour")
+        self.a_legend.setCheckable(True)
+        self.a_legend.setChecked(True)
+        self.a_details = A("Show item details (pictures && features)", self._toggle_details, None,
+                           "Show the panel on the right with the pictures, must-have features "
+                           "and features to avoid of the item at the cursor")
+        self.a_details.setCheckable(True)
+        self.a_details.setChecked(True)
+
+        self.a_zoom_in = A("Zoom in", lambda: self._zoom(1), ["Ctrl+=", "Ctrl++"])
+        self.a_zoom_out = A("Zoom out", lambda: self._zoom(-1), "Ctrl+-")
+        self.a_zoom_reset = A("Reset zoom", lambda: self._zoom(0), "Ctrl+0")
+        self.a_dark = A("Dark theme", lambda c: self._set_dark(c))
+        self.a_dark.setCheckable(True)
+        self.a_settings = A("Settings…", self.open_settings)
+        self.a_shortcuts = A("Keyboard shortcuts", self.show_shortcuts, "F1")
+        self.a_about = A("About", self.show_about)
+
+        e.reserve_shortcuts(self.actions())
+        self._update_context_actions()
+
+    def _update_context_actions(self) -> None:
+        self.editor.context_actions = [
+            self.a_edit, self.a_explain, None, self.a_add_sibling,
+            self.a_add_child, self.a_spacer, self.a_duplicate, self.a_delete_line,
+            self.a_delete, None,
+            self.a_up, self.a_down, self.a_left, self.a_right, None,
+            self.a_toggle, self.a_collapse_branch, self.a_expand_branch, None,
+            *self.mark_actions, None, *self.word_actions]
+
+    def _build_menus(self) -> None:
+        mb = self.menuBar()
+        m = mb.addMenu("&File")
+        m.addActions([self.a_new, self.a_open])
+        self.recent_menu = m.addMenu("Open &recent")
+        m.addSeparator()
+        m.addActions([self.a_save, self.a_save_as])
+        m.addSeparator()
+        m.addAction(self.a_quit)
+        self._rebuild_recent()
+
+        m = mb.addMenu("&Edit")
+        m.addActions([self.a_undo, self.a_redo])
+        m.addSeparator()
+        m.addActions([self.a_find, self.a_find_next, self.a_find_prev])
+        m.addSeparator()
+        m.addAction(self.a_column)
+
+        self.tree_menu = mb.addMenu("&Tree")
+        self._fill_tree_menu()
+
+        m = mb.addMenu("&View")
+        m.addActions([self.a_collapse_all, self.a_collapse_level, self.a_expand_level,
+                      self.a_expand_all])
+        lv = m.addMenu("Show levels")
+        lv.addActions(self.level_actions)
+        m.addSeparator()
+        m.addActions([self.a_toggle, self.a_collapse_branch, self.a_expand_branch])
+        m.addSeparator()
+        m.addActions([self.a_zoom_in, self.a_zoom_out, self.a_zoom_reset])
+        m.addSeparator()
+        m.addActions([self.a_legend, self.a_details, self.a_dark, self.a_settings])
+
+        m = mb.addMenu("&Help")
+        m.addActions([self.a_shortcuts, self.a_about])
+
+    def _build_toolbar(self) -> None:
+        # Row 1: file + folding of the whole document
+        tb = QToolBar("Main")
+        tb.setObjectName("main_toolbar")
+        tb.setMovable(False)
+        self.addToolBar(tb)
+        self._add_tool_buttons(tb, [
+            (self.a_open, "Open"), (self.a_save, "Save"), None,
+            (self.a_collapse_all, "Collapse all"), (self.a_collapse_level, "Collapse level"),
+            (self.a_expand_level, "Expand level"), (self.a_expand_all, "Expand all"), None,
+        ])
+        self.level_spin = QSpinBox()
+        self.level_spin.setPrefix("Levels: ")
+        self.level_spin.setRange(0, 99)
+        self.level_spin.setToolTip("How many levels of branches to show (Ctrl+1 … Ctrl+9)")
+        self.level_spin.valueChanged.connect(self._level_spin_changed)
+        tb.addWidget(_captioned(self.level_spin, "Ctrl+1 … 9"))
+        tb.addSeparator()
+        self._add_tool_buttons(tb, [
+            (self.a_expl_left, "Explanations ←"), (self.a_expl_right, "Explanations →"),
+            (self.a_column, "Column select"),
+        ])
+        tb.addSeparator()
+        self.mark_menu = QMenu(self)
+        self.mark_menu.addActions(self.mark_actions)
+        self.words_menu = QMenu(self)
+        self.words_menu.addActions(self.word_actions)
+        self.mark_buttons = {}
+        for action, label, caption, menu, kind in (
+                (self.a_mark_menu, "Mark line", "Alt+G/O/R/C", self.mark_menu, "line"),
+                (self.a_words_menu, "Mark words", "Alt+Shift+G/O/R/C", self.words_menu, "word")):
+            btn = ActionButton(action, label, caption=caption)
+            self.mark_buttons[kind] = btn
+            btn.setMenu(menu)
+            btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            btn.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
+            tb.addWidget(btn)
+
+        # Row 2: editing branches
+        self.addToolBarBreak()
+        tb2 = QToolBar("Tree")
+        tb2.setObjectName("tree_toolbar")
+        tb2.setMovable(False)
+        self.addToolBar(tb2)
+        self._add_tool_buttons(tb2, [
+            (self.a_add_sibling, "Add item"), (self.a_add_child, "Add sub-item"),
+            (self.a_spacer, "Empty line"),
+            (self.a_edit, "Explanation"), None,
+            (self.a_up, "Move up"), (self.a_down, "Move down"),
+            (self.a_left, "Move left"), (self.a_right, "Move right"), None,
+            (self.a_format, "Format"), (self.a_delete_line, "Delete line"),
+            (self.a_delete, "Delete branch"),
+        ])
+
+    def _add_tool_buttons(self, tb: QToolBar, items) -> None:
+        for item in items:
+            if item is None:
+                tb.addSeparator()
+                continue
+            action, label = item
+            tb.addWidget(ActionButton(action, label))
+
+    def _refresh_icons(self, dark: bool) -> None:
+        color = "#c9ccd3" if dark else "#3b4048"
+        danger = "#e5737c" if dark else "#c0392b"
+        for action, kind in (
+                (self.a_open, "open"), (self.a_save, "save"),
+                (self.a_collapse_all, "collapse_all"), (self.a_collapse_level, "collapse_level"),
+                (self.a_expand_level, "expand_level"), (self.a_expand_all, "expand_all"),
+                (self.a_add_sibling, "add_item"), (self.a_add_child, "add_child"),
+                (self.a_spacer, "spacer"),
+                (self.a_edit, "edit"), (self.a_delete, "delete"),
+                (self.a_up, "up"), (self.a_down, "down"), (self.a_left, "left"),
+                (self.a_right, "right"), (self.a_format, "format"),
+                (self.a_delete_line, "delete_line"), (self.a_column, "column"),
+                (self.a_expl_left, "expl_left"), (self.a_expl_right, "expl_right")):
+            action.setIcon(make_icon(kind, danger if kind in ("delete", "delete_line") else color))
+        # Colour commands, their icons and the legend follow the theme.
+        self._rebuild_colour_actions()
+
+    def _build_statusbar(self) -> None:
+        sb = self.statusBar()
+        self.path_label = QLabel()
+        self.pos_label = QLabel()
+        self.column_label = QLabel(" COLUMN ")
+        self.column_label.setToolTip("Column selection is on (Alt+Shift+Insert to switch off)")
+        self.column_label.setStyleSheet("font-weight: 600; color: palette(highlighted-text); "
+                                        "background: palette(highlight); border-radius: 3px;")
+        self.column_label.hide()
+        self.pos_label.setMinimumWidth(self.pos_label.fontMetrics().horizontalAdvance("Ln 99999, Col 999") + 12)
+        sb.addPermanentWidget(self.path_label, 1)
+        sb.addPermanentWidget(self.column_label)
+        sb.addPermanentWidget(self.pos_label)
+
+    # ---- status ----------------------------------------------------------
+    def _column_mode_changed(self, on: bool) -> None:
+        self.a_column.blockSignals(True)
+        self.a_column.setChecked(on)
+        self.a_column.blockSignals(False)
+        self.column_label.setVisible(on)
+
+    def _update_level_display(self) -> None:
+        mx = self.editor.max_level()
+        cur = self.editor.current_level()
+        self.level_spin.blockSignals(True)
+        self.level_spin.setMaximum(max(mx, 0))
+        self.level_spin.setSuffix(f" / {mx}")
+        self.level_spin.setValue(cur)
+        self.level_spin.blockSignals(False)
+
+    def _level_spin_changed(self, value: int) -> None:
+        self.editor.show_to_level(value)
+
+    def _update_position(self) -> None:
+        cur = self.editor.textCursor()
+        self.pos_label.setText(f"Ln {cur.blockNumber() + 1}, Col {cur.positionInBlock() + 1}")
+        if self.editor._rev_ok():
+            node = self.editor._map.node_near(cur.blockNumber())
+            self.path_label.setText("  " + " › ".join(node.path()) if node else "")
+
+    # ---- files -----------------------------------------------------------
+    def _update_title(self) -> None:
+        name = os.path.basename(self.path) if self.path else "Untitled"
+        self.setWindowTitle(f"{name}[*] — {APP_NAME}")
+        self.setWindowModified(self.editor.document().isModified())
+
+    def maybe_save(self) -> bool:
+        if not self.editor.document().isModified():
+            return True
+        name = os.path.basename(self.path) if self.path else "Untitled"
+        r = QMessageBox.question(
+            self, APP_NAME, f"Save changes to “{name}”?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
+        if r == QMessageBox.StandardButton.Save:
+            return self.save()
+        return r == QMessageBox.StandardButton.Discard
+
+    def _fill_tree_menu(self) -> None:
+        m = self.tree_menu
+        m.clear()
+        m.addActions([self.a_add_sibling, self.a_add_child, self.a_spacer, self.a_edit,
+                      self.a_explain, self.a_duplicate, self.a_delete_line, self.a_delete])
+        m.addSeparator()
+        m.addActions([self.a_up, self.a_down, self.a_left, self.a_right])
+        m.addSeparator()
+        m.addActions([self.a_expl_left, self.a_expl_right, self.a_format])
+        m.addSeparator()
+        m.addActions(self.mark_actions)
+        m.addSeparator()
+        m.addActions(self.word_actions)
+        m.addSeparator()
+        m.addActions([self.a_add_colour, self.a_edit_legend, self.a_save_colours,
+                      self.a_load_colours])
+
+    # ---- colour legend -----------------------------------------------------
+    def colour_shortcut_text(self, row) -> str:
+        """'Whole name: Alt+G  ·  Word / selection: Alt+Shift+G' for a legend row."""
+        key = row.key if isinstance(row, ColourEntry) else row
+        line, word = self.editor.colours.row_keys(key)
+        parts = []
+        if line:
+            parts.append(f"Whole name: {native_keys(line)}")
+        if word:
+            parts.append(f"Word / selection: {native_keys(word)}")
+        return "  ·  ".join(parts)
+
+    def _colour_actions(self) -> List[QAction]:
+        return [*self.builtin_line_actions.values(), *self.builtin_word_actions.values(),
+                self.a_mark_clear, self.a_word_clear,
+                *self.custom_line_actions.values(), *self.custom_word_actions.values()]
+
+    def taken_shortcuts(self) -> Dict[str, str]:
+        """{key combination: command} of every command that is not a colour
+        command, plus keys the editor and the menus need."""
+        own = {id(a) for a in self._colour_actions()}
+        taken: Dict[str, str] = {}
+        for k, what in EDITOR_RESERVED_KEYS.items():
+            taken[normalize_keys(k)] = what
+        for a in self.actions():
+            if id(a) in own:
+                continue
+            name = re.sub(r"&(?!&)", "", a.text()).replace("&&", "&").rstrip("…")
+            for seq in a.shortcuts():
+                k = normalize_keys(seq)
+                if k:
+                    taken.setdefault(k, name)
+        return taken
+
+    @staticmethod
+    def _set_keys(action: QAction, portable: str) -> None:
+        action.setShortcut(QKeySequence.fromString(portable, QKeySequence.SequenceFormat.PortableText)
+                           if portable else QKeySequence())
+
+    def _rebuild_colour_actions(self) -> None:
+        """Menus, shortcuts, captions and icons follow the legend."""
+        pal, theme, ed = self.editor.colours, self.editor.theme, self.editor
+        for e in pal.entries:
+            if e.builtin:
+                la, wa = self.builtin_line_actions[e.key], self.builtin_word_actions[e.key]
+                la.setText(f"Colour line: {e.label}".replace("&", "&&"))
+                wa.setText(f"Colour word / selection: {e.label}".replace("&", "&&"))
+                self._set_keys(la, e.line_key)
+                self._set_keys(wa, e.word_key)
+        self._set_keys(self.a_mark_clear, pal.text_line_key)
+        self._set_keys(self.a_word_clear, pal.text_word_key)
+        for store in (self.custom_line_actions, self.custom_word_actions):
+            for a in store.values():
+                for w in (self, self.mark_menu, self.words_menu, self.tree_menu):
+                    w.removeAction(a)
+                a.deleteLater()
+            store.clear()
+        for e in pal.customs():
+            for store, word in ((self.custom_line_actions, False),
+                                (self.custom_word_actions, True)):
+                if word:
+                    text, keys = f"Colour word / selection: {e.label}", e.word_key
+                    slot = (lambda checked=False, m=e.mark: ed.mark_words(m))
+                else:
+                    text, keys = f"Colour line: {e.label}", e.line_key
+                    slot = (lambda checked=False, m=e.mark: ed.mark_selection(m))
+                a = self._act(text.replace("&", "&&"), slot, keys or None)
+                store[e.key] = a
+        # tooltips + icons
+        rows = [(e, self.builtin_line_actions.get(e.key) or self.custom_line_actions[e.key],
+                 self.builtin_word_actions.get(e.key) or self.custom_word_actions[e.key])
+                for e in pal.entries]
+        for e, la, wa in rows:
+            color = pal.colour(e.mark, theme)
+            for a, what, k in ((la, "the whole name", e.line_key),
+                               (wa, "the word at the cursor (or the selected characters)",
+                                e.word_key)):
+                keys = f"  ({native_keys(k)})" if k else ""
+                a.setToolTip(f"Colour {what}: {e.label}{keys} - press again to remove")
+                a.setStatusTip(f"Colour {what}: {e.label}")
+                a.setIcon(make_dots_icon([color]))
+        for a, k, what in ((self.a_mark_clear, pal.text_line_key, "the whole name"),
+                           (self.a_word_clear, pal.text_word_key, "the word at the cursor "
+                                                                  "(or the selected characters)")):
+            keys = f"  ({native_keys(k)})" if k else ""
+            a.setToolTip(f"Give {what} the default text colour again{keys}")
+            a.setIcon(make_dots_icon([pal.text_colour(theme)]))
+        ed.reserve_shortcuts(self._colour_actions())
+        self.mark_actions = ([self.builtin_line_actions[k] for k in ("checked", "explore", "problem")]
+                             + [self.custom_line_actions[e.key] for e in pal.customs()]
+                             + [self.a_mark_clear])
+        self.word_actions = ([self.builtin_word_actions[k] for k in ("checked", "explore", "problem")]
+                             + [self.custom_word_actions[e.key] for e in pal.customs()]
+                             + [self.a_word_clear])
+        self.mark_menu.clear()
+        self.mark_menu.addActions(self.mark_actions)
+        self.words_menu.clear()
+        self.words_menu.addActions(self.word_actions)
+        self._fill_tree_menu()
+        self._update_context_actions()
+        line_rows = [f"{e.label}: {native_keys(e.line_key)}" for e in pal.entries if e.line_key]
+        word_rows = [f"{e.label}: {native_keys(e.word_key)}" for e in pal.entries if e.word_key]
+        if pal.text_line_key:
+            line_rows.append(f"Default colour: {native_keys(pal.text_line_key)}")
+        if pal.text_word_key:
+            word_rows.append(f"Default colour: {native_keys(pal.text_word_key)}")
+        self.a_mark_menu.setToolTip("Mark line - colour the whole branch name (line at the "
+                                    "cursor or selected lines):\n" + "\n".join(line_rows))
+        self.a_words_menu.setToolTip("Mark words - colour only the word at the cursor or the "
+                                     "selected characters:\n" + "\n".join(word_rows))
+        builtin = [pal.by_key(k) for k in ("checked", "explore", "problem")]
+        if hasattr(self, "mark_buttons"):
+            self.mark_buttons["line"].set_caption(
+                compact_keys([e.line_key for e in builtin] + [pal.text_line_key]))
+            self.mark_buttons["word"].set_caption(
+                compact_keys([e.word_key for e in builtin] + [pal.text_word_key]))
+        cols = [pal.colour(m, theme) for m in (MARK_CHECKED, MARK_EXPLORE, MARK_PROBLEM)]
+        self.a_mark_menu.setIcon(make_mark_icon("line", cols, theme.guide))
+        self.a_words_menu.setIcon(make_mark_icon("words", cols, theme.guide))
+        self.legend.rebuild()
+
+    def _palette_loaded(self) -> None:
+        self.editor.palette_changed()
+        self._rebuild_colour_actions()
+
+    def _apply_palette_change(self, message: str) -> None:
+        self.editor.palette_changed()
+        self._rebuild_colour_actions()
+        self._marks_changed()                    # the legend is stored with the tree
+        self.statusBar().showMessage(message, 5000)
+
+    def legend_menu(self, key: str, parent: QWidget) -> QMenu:
+        menu = QMenu(parent)
+        pal = self.editor.colours
+        if key == "text":
+            menu.addAction(self.a_mark_clear)
+            menu.addAction(self.a_word_clear)
+            menu.addSeparator()
+            menu.addAction("Edit meaning, colour && shortcuts…", lambda: self.edit_colour("text"))
+        elif key == "explanation":
+            info = menu.addAction("Explanations can't be coloured with a command")
+            info.setEnabled(False)
+            menu.addAction("Edit meaning && colour…", lambda: self.edit_colour("explanation"))
+        else:
+            e = pal.by_key(key)
+            if e is None:
+                return menu
+            line = (self.builtin_line_actions if e.builtin else self.custom_line_actions).get(key)
+            word = (self.builtin_word_actions if e.builtin else self.custom_word_actions).get(key)
+            for a in (line, word):
+                if a is not None:
+                    menu.addAction(a)
+            menu.addSeparator()
+            menu.addAction("Edit meaning, colour && shortcuts…", lambda: self.edit_colour(key))
+            rm = menu.addAction("Remove colour", lambda: self.remove_colour(key))
+            if e.builtin:
+                rm.setEnabled(False)
+                rm.setToolTip("Built-in colours can't be removed")
+        menu.addSeparator()
+        menu.addAction(self.a_add_colour)
+        menu.addAction(self.a_edit_legend)
+        return menu
+
+    @staticmethod
+    def _dialog_code(result) -> int:
+        return int(result.value) if hasattr(result, "value") else int(result)
+
+    def add_colour(self) -> None:
+        pal = self.editor.colours
+        if len(pal.customs()) >= CUSTOM_MAX:
+            QMessageBox.information(self, APP_NAME, f"The legend already has {CUSTOM_MAX} own "
+                                    "colours - remove one first.")
+            return
+        dlg = ColourDialog(self, pal, self.editor.theme, taken=self.taken_shortcuts())
+        if self._dialog_code(dlg.exec()) != 1:
+            return
+        label, color, line, word = dlg.values()
+        e = pal.add_custom(label, color, line, word)
+        keys = self.colour_shortcut_text(e.key)
+        self._apply_palette_change(f"Colour “{e.label}” added to the legend"
+                                   + (f" - {keys}" if keys else
+                                      " - use it from the legend or the Mark menus"))
+
+    def edit_colour(self, key: str) -> None:
+        """Edit meaning, colour and shortcuts of any row of the legend."""
+        pal = self.editor.colours
+        e = pal.by_key(key) if key not in ("text", "explanation") else None
+        if key not in ("text", "explanation") and e is None:
+            return
+        dlg = ColourDialog(self, pal, self.editor.theme, entry=e,
+                           fixed=key if e is None else None, taken=self.taken_shortcuts())
+        code = self._dialog_code(dlg.exec())
+        if code == ColourDialog.REMOVE:
+            self.remove_colour(key)
+            return
+        if code != 1:
+            return
+        label, color, line, word = dlg.values()
+        if key == "text":
+            pal.text_label, pal.text_color = label, color
+            pal.text_line_key, pal.text_word_key = line, word
+        elif key == "explanation":
+            pal.explanation_label, pal.explanation_color = label, color
+        else:
+            e.label, e.line_key, e.word_key = label, line, word
+            e.color = color if (e.builtin or color) else e.color
+        self._apply_palette_change(f"Legend updated: {label}")
+
+    def _ask_remove_default(self, e: ColourEntry, uses: int) -> str:
+        """'everywhere', 'here' or 'cancel' for a colour that is also in the
+        default legend."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Remove colour")
+        used = (f"It is used {uses} time(s) in this tree - those names and words get the "
+                "default text colour again.\n\n" if uses else "")
+        box.setText(f"Remove “{e.label}”?")
+        box.setInformativeText(used + "This colour is also in your default legend, so every new "
+                               "tree starts with it. Remove it there too?")
+        everywhere = box.addButton("Remove everywhere", QMessageBox.ButtonRole.DestructiveRole)
+        here = box.addButton("Only from this tree", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(everywhere)
+        box.exec()
+        clicked = box.clickedButton()
+        return "everywhere" if clicked is everywhere else "here" if clicked is here else "cancel"
+
+    def remove_colour(self, key: str) -> bool:
+        pal = self.editor.colours
+        e = pal.by_key(key)
+        if e is None or e.builtin:
+            self.statusBar().showMessage("Built-in colours can't be removed - change their "
+                                         "meaning, colour or shortcuts instead", 5000)
+            return False
+        uses = self.editor.mark_uses(e.mark)
+        everywhere = False
+        if self.default_palette.by_key(key) is not None:
+            choice = self._ask_remove_default(e, uses)
+            if choice == "cancel":
+                return False
+            everywhere = choice == "everywhere"
+        elif uses:
+            answer = QMessageBox.question(
+                self, "Remove colour",
+                f"“{e.label}” is used {uses} time(s) in this tree.\n\n"
+                "Remove the colour? Those names and words get the default text colour again.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        if uses:
+            self.editor.clear_mark(e.mark)
+        pal.remove(key)
+        if everywhere and not self._remove_from_default(key):
+            everywhere = False
+        self._apply_palette_change(f"Colour “{e.label}” removed "
+                                   + ("from this tree and from the default legend" if everywhere
+                                      else "from this tree"))
+        return True
+
+    def _remove_from_default(self, key: str) -> bool:
+        default = self._read_default_colours()
+        if self._default_colours_warning:
+            self.statusBar().showMessage(self._default_colours_warning, 10000)
+            return False
+        try:
+            default.remove(key)
+        except ValueError:
+            pass
+        if not self._write_default(default):
+            return False
+        self.default_palette = default
+        return True
+
+    def _read_default_colours(self) -> Palette:
+        path = default_colours_path()
+        self._default_colours_warning = ""
+        if not os.path.isfile(path):
+            return Palette.factory()
+        try:
+            with open(path, encoding="utf-8") as f:
+                return Palette.from_json(json.load(f))
+        except (OSError, ValueError, TypeError, AttributeError) as ex:
+            self._default_colours_warning = (f"The default colour legend could not be read "
+                                             f"({path}: {ex}) - using the standard colours.")
+            return Palette.factory()
+
+    def _write_default(self, palette: Palette) -> bool:
+        path = default_colours_path()
+        data = {"app": APP_NAME, "kind": "colour-legend", "version": 2, **palette.to_json()}
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            f = QSaveFile(path)
+            if not f.open(QIODevice.OpenModeFlag.WriteOnly):
+                raise OSError(f.errorString())
+            f.write(QByteArray(json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")))
+            if not f.commit():
+                raise OSError(f.errorString())
+        except OSError as ex:
+            QMessageBox.critical(self, APP_NAME, f"The default legend could not be saved:\n"
+                                 f"{path}\n\n{ex}")
+            return False
+        return True
+
+    def save_default_colours(self) -> bool:
+        if not self._write_default(self.editor.colours):
+            return False
+        self.default_palette = self.editor.colours.copy()
+        self._marks_changed()
+        self.statusBar().showMessage(f"Legend saved as default for every new tree: "
+                                     f"{default_colours_path()}", 8000)
+        return True
+
+    def load_default_colours(self) -> None:
+        default = self._read_default_colours()
+        if self._default_colours_warning:
+            self.statusBar().showMessage(self._default_colours_warning, 10000)
+            return
+        self.default_palette = default
+        pal = self.editor.colours
+        pal.text_label, pal.explanation_label = default.text_label, default.explanation_label
+        pal.text_color, pal.explanation_color = default.text_color, default.explanation_color
+        for d in default.entries:
+            if d.builtin:
+                b = pal.by_key(d.key)
+                b.label, b.color = d.label, d.color
+        added = pal.merge(default)
+        self._apply_palette_change(f"Default legend loaded - {len(added)} colour(s) added")
+
+    def open_legend_dialog(self) -> None:
+        LegendDialog(self).exec()
+
+    def _toggle_legend(self, on: bool) -> None:
+        self.legend.setVisible(bool(on))
+        self.settings.setValue("show_legend", bool(on))
+
+    # ---- item details (pictures, must-have features, features to avoid) ----
+    def _toggle_details(self, on: bool) -> None:
+        self.details_area.setVisible(bool(on))
+        self.settings.setValue("show_details", bool(on))
+        if on:
+            self._apply_default_details_width()
+            self._sync_details_panel()
+
+    def _sync_details_panel(self) -> None:
+        """Show the item at the cursor in the panel (after cursor moves and
+        after every re-read of the text, so the panel follows key changes)."""
+        ed = self.editor
+        if not ed._rev_ok():
+            return                       # the editor re-reads the text shortly
+        node = ed.current_item()
+        if node is None:
+            self.details_panel.show_item(None)
+        else:
+            self.details_panel.show_item(idt.key_of(node), node.name, node.path())
+
+    def _details_changed(self) -> None:
+        """Pictures / features are part of the tree: saved with it."""
+        self.editor.document().setModified(True)
+        if self.details_panel.last_dir:
+            self.settings.setValue("image_dir", self.details_panel.last_dir)
+
+    def _load_details(self, path: str) -> None:
+        entries = self.item_store.open(path)
+        self.editor.details = {k: d for k, d in entries}
+        self.details_panel.refresh()
+        self._sync_details_panel()
+        if self.item_store.load_error:
+            QMessageBox.warning(
+                self, APP_NAME,
+                "The pictures and features of this tree could not be read:\n"
+                f"{os.path.join(self.item_store.folder, idt.DB_FILE)}\n\n"
+                f"{self.item_store.load_error}\n\nThe tree itself is fine. When you save, the "
+                "unreadable file is kept as a backup next to it and no picture is deleted.")
+
+    def _save_details(self, path: str) -> bool:
+        ed = self.editor
+        live = ed.export_details()
+        keep = {f for d in ed.details.values() for f in d.files()}
+        try:
+            self.item_store.save(path, live, keep)
+        except OSError as ex:
+            QMessageBox.warning(
+                self, APP_NAME,
+                f"The tree was saved, but its pictures and features could not be saved:\n"
+                f"{idt.ItemStore.folder_for(path)}\n\n{ex}\n\nCheck that the folder is "
+                "writable and save again.")
+            ed.document().setModified(True)
+            return False
+        self.details_panel.refresh()
+        return True
+
+    def new_file(self, ask: bool = True) -> None:
+        if ask and not self.maybe_save():
+            return
+        self.path = None
+        self.newline = os.linesep if os.linesep in ("\n", "\r\n") else "\n"
+        self.item_store.reset()
+        self.editor.set_document_text(NEW_DOCUMENT)
+        self.editor.set_palette(self.default_palette.copy())
+        self._palette_loaded()
+        self.editor.moveCursor(QTextCursor.MoveOperation.End)
+        self.details_panel.refresh()
+        self._sync_details_panel()
+        self._update_title()
+
+    def open_dialog(self) -> None:
+        if not self.maybe_save():
+            return
+        start = os.path.dirname(self.path) if self.path else str(self.settings.value("last_dir", ""))
+        path, _ = QFileDialog.getOpenFileName(self, "Open tree", start,
+                                              "Text files (*.txt);;All files (*)")
+        if path:
+            self.load_file(path)
+
+    def _open_dropped(self, path: str) -> None:
+        if self.maybe_save():
+            self.load_file(path)
+
+    def load_file(self, path: str) -> bool:
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as ex:
+            QMessageBox.critical(self, APP_NAME, f"Could not open the file:\n{path}\n\n{ex}")
+            self._remove_recent(path)
+            return False
+        if b"\x00" in data[:4096]:
+            QMessageBox.critical(self, APP_NAME, f"This does not look like a text file:\n{path}")
+            return False
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = data.decode("utf-8", errors="replace")
+            QMessageBox.warning(self, APP_NAME,
+                                "The file is not valid UTF-8. Unreadable characters were "
+                                "replaced with �. Saving will write UTF-8.")
+        self.newline = "\r\n" if b"\r\n" in data else "\n"
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if text.endswith("\n"):
+            text = text[:-1]
+        self.editor.set_document_text(text)
+        self.path = os.path.abspath(path)
+        self.settings.setValue("last_dir", os.path.dirname(self.path))
+        self._add_recent(self.path)
+        self._update_title()
+        self.statusBar().showMessage(f"Opened {self.path}", 4000)
+        self._load_marks(self.path)          # after "Opened", so a warning stays visible
+        self._load_details(self.path)
+        return True
+
+    def save(self) -> bool:
+        if not self.path:
+            return self.save_as()
+        return self._write(self.path)
+
+    def save_as(self) -> bool:
+        start = self.path or os.path.join(str(self.settings.value("last_dir", "")), "tree.txt")
+        path, _ = QFileDialog.getSaveFileName(self, "Save tree", start,
+                                              "Text files (*.txt);;All files (*)")
+        if not path:
+            return False
+        if not os.path.splitext(path)[1]:
+            path += ".txt"
+        return self._write(path)
+
+    def _write(self, path: str) -> bool:
+        if self.format_on_save:
+            self.editor.format_document(quiet=True, canonical=False)
+        text = self.editor.toPlainText()
+        data = (text.replace("\n", self.newline) + self.newline).encode("utf-8")
+        f = QSaveFile(path)            # atomic: writes a temp file, then renames
+        if not f.open(QIODevice.OpenModeFlag.WriteOnly):
+            QMessageBox.critical(self, APP_NAME, f"Could not save:\n{path}\n\n{f.errorString()}")
+            return False
+        f.write(QByteArray(data))
+        if not f.commit():
+            QMessageBox.critical(self, APP_NAME, f"Could not save:\n{path}\n\n{f.errorString()}")
+            return False
+        self.path = os.path.abspath(path)
+        self.settings.setValue("last_dir", os.path.dirname(self.path))
+        self.editor.document().setModified(False)
+        self._add_recent(self.path)
+        self._update_title()
+        self.statusBar().showMessage(f"Saved {self.path}", 4000)
+        self._save_marks(self.path)
+        self._save_details(self.path)
+        return True
+
+    # ---- status marks file (<file>.marks.json next to the .txt) ----------
+    @staticmethod
+    def marks_path(path: str) -> str:
+        return path + ".marks.json"
+
+    def _load_marks(self, path: str) -> None:
+        """Read <file>.marks.json: the tree's colour legend and its marks."""
+        mp = self.marks_path(path)
+        self.editor.set_palette(self.default_palette.copy())
+        if not os.path.isfile(mp):
+            self._palette_loaded()
+            return
+        try:
+            with open(mp, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("not a JSON object")
+            palette = (Palette.from_json(data["legend"]) if "legend" in data
+                       else self.default_palette.copy())
+            by_name = {e.key: e.mark for e in palette.entries}
+            entries = []
+            for item in data.get("marks", []):
+                key = tuple((str(name), int(nth)) for name, nth in item["path"])
+                mark = by_name.get(item.get("mark"))
+                if key and mark:
+                    entries.append((key, mark))
+            spans = []
+            span_by_name = {**by_name, "default": MARK_DEFAULT}
+            for item in data.get("words", []):
+                key = tuple((str(name), int(nth)) for name, nth in item["path"])
+                mark = span_by_name.get(item.get("mark"))
+                part = str(item["part"])
+                start, end, text = int(item["start"]), int(item["end"]), str(item["text"])
+                # Only names can be coloured (older files may hold explanation
+                # colours - those are ignored).
+                if key and mark and part == "name" \
+                        and 0 <= start < end and len(text) == end - start:
+                    spans.append((key, (part, start, end, mark, text)))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as ex:
+            self._palette_loaded()
+            self.statusBar().showMessage(f"Colour marks could not be read ({ex}); "
+                                         "the tree itself is fine.", 8000)
+            return
+        self.editor.set_palette(palette)
+        self._palette_loaded()
+        self.editor.load_marks(entries, spans)
+
+    def _save_marks(self, path: str) -> bool:
+        mp = self.marks_path(path)
+        pal = self.editor.colours
+        names = {e.mark: e.key for e in pal.entries}
+        names[MARK_DEFAULT] = "default"
+        entries = [(k, m) for k, m in self.editor.export_marks() if m in names]
+        spans = [(k, sp) for k, sp in self.editor.export_spans() if sp[3] in names]
+        try:
+            if not entries and not spans and pal.same_as(self.default_palette):
+                if os.path.isfile(mp):
+                    os.remove(mp)
+                return True
+            data = {"app": APP_NAME, "version": 2, "file": os.path.basename(path),
+                    "legend": pal.to_json(),
+                    "marks": [{"path": [[name, nth] for name, nth in key],
+                               "mark": names[m]} for key, m in entries],
+                    "words": [{"path": [[name, nth] for name, nth in key], "part": sp[0],
+                               "start": sp[1], "end": sp[2], "text": sp[4],
+                               "mark": names[sp[3]]} for key, sp in spans]}
+            f = QSaveFile(mp)
+            if not f.open(QIODevice.OpenModeFlag.WriteOnly):
+                raise OSError(f.errorString())
+            f.write(QByteArray(json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")))
+            if not f.commit():
+                raise OSError(f.errorString())
+            return True
+        except OSError as ex:
+            self.statusBar().showMessage(f"Colour marks could not be saved: {ex}", 8000)
+            return False
+
+    def _marks_changed(self) -> None:
+        if self.path:                    # marks are stored right away
+            self._save_marks(self.path)
+
+    # ---- recent files ----------------------------------------------------
+    def _recent(self) -> List[str]:
+        v = self.settings.value("recent", [])
+        if isinstance(v, str):
+            v = [v]
+        return [p for p in (v or []) if isinstance(p, str)]
+
+    def _add_recent(self, path: str) -> None:
+        items = [p for p in self._recent() if os.path.normcase(p) != os.path.normcase(path)]
+        self.settings.setValue("recent", ([path] + items)[: self.MAX_RECENT])
+        self._rebuild_recent()
+
+    def _remove_recent(self, path: str) -> None:
+        self.settings.setValue("recent", [p for p in self._recent() if p != path])
+        self._rebuild_recent()
+
+    def _rebuild_recent(self) -> None:
+        self.recent_menu.clear()
+        items = self._recent()
+        for p in items:
+            a = self.recent_menu.addAction(p)
+            a.triggered.connect(lambda _=False, p=p: self._open_recent(p))
+        self.recent_menu.setEnabled(bool(items))
+
+    def _open_recent(self, path: str) -> None:
+        if self.maybe_save():
+            self.load_file(path)
+
+    # ---- view ------------------------------------------------------------
+    def _zoom(self, step: int) -> None:
+        size = DEFAULT_FONT_SIZE if step == 0 else self.editor.font_size() + step
+        self.editor.set_font_size(size)
+
+    def _set_dark(self, dark: bool, save: bool = True) -> None:
+        apply_app_palette(QApplication.instance(), dark)
+        self.editor.set_theme(Theme(dark))
+        self.details_panel.set_dark(dark)
+        self._refresh_icons(dark)
+        self.a_dark.blockSignals(True)
+        self.a_dark.setChecked(dark)
+        self.a_dark.blockSignals(False)
+        if save:
+            self.settings.setValue("dark", dark)
+
+    def open_settings(self) -> None:
+        dlg = SettingsDialog(self, self.editor.options, self.format_on_save)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.editor.options = tm.FormatOptions(dlg.min_col.value(), dlg.gap.value())
+        self.format_on_save = dlg.on_save.isChecked()
+        self.settings.setValue("min_comment_column", dlg.min_col.value())
+        self.settings.setValue("comment_gap", dlg.gap.value())
+        self.settings.setValue("format_on_save", self.format_on_save)
+        self.editor.format_document()
+
+    def _legend_help_rows(self) -> List[Tuple[str, str]]:
+        pal = self.editor.colours
+        rows = [(f"{pal.text_label} (default colour)", self.colour_shortcut_text("text"))]
+        rows += [(e.label, self.colour_shortcut_text(e.key)) for e in pal.entries]
+        return rows
+
+    def show_shortcuts(self) -> None:
+        rows = [
+            ("Whole document", ""),
+            ("Collapse all / Expand all", "Alt+1 / Alt+4"),
+            ("Collapse one level / Expand one level", "Alt+2 / Alt+3"),
+            ("Show exactly N levels", "Ctrl+1 … Ctrl+9"),
+            ("Single branch", ""),
+            ("Toggle branch at cursor", "Ctrl+.  or click the ▼/▶ arrow"),
+            ("Collapse / expand branch fully", "Ctrl+Shift+.  /  Ctrl+Shift+,  (or Alt+click arrow)"),
+            ("Open a folded branch", "click its “⋯ N items” badge"),
+            ("Editing", ""),
+            ("New item (same level)", "Enter at end of name  or  Ctrl+Enter"),
+            ("New sub-item", "Ctrl+Shift+Enter"),
+            ("Insert empty line (vertical lines kept)", "Alt+Enter"),
+            ("Colour marks (names only) - change them in the legend", ""),
+            *[(f"{label}", keys or "no shortcut") for label, keys in self._legend_help_rows()],
+            ("Move right / left one level", "Tab / Shift+Tab  (or Alt+Shift+→ / ←)"),
+            ("Move up / down", "Alt+Shift+↑ / ↓"),
+            ("Edit name & explanation", f"{EDIT_SHORTCUT}  (explanation only: Ctrl+E)"),
+            ("Duplicate / delete branch", "Ctrl+D / Ctrl+Shift+Delete"),
+            ("Delete line (sub-items kept)", "Ctrl+Q"),
+            ("Column selection on / off", "Alt+Shift+Insert  (then Shift+arrows or drag)"),
+            ("Paste several lines", "each line becomes its own branch on the same level"),
+            ("Remove an empty new item", "Backspace"),
+            ("Move explanations left / right", "Alt+← / Alt+→  (selection, or whole document)"),
+            ("Format document (auto-align all)", "Ctrl+Alt+L  (saving tidies lines, keeps # columns)"),
+            ("Find", "Ctrl+F, F3, Shift+F3"),
+            ("Raw newline (no auto item)", "Shift+Enter"),
+            ("Item details panel (right side) - View › Show item details", ""),
+            ("Add pictures", "drag & drop files, “Add images…”, or Ctrl+V in the picture"),
+            ("Previous / next picture", "‹ / ›  or  ← / → in the picture"),
+            ("Zoom in / out / fit / 100 %", "mouse wheel, + / − / 0 / 1 in the picture"),
+            ("Open large / remove picture", "double-click / Delete in the picture"),
+            ("Change the order of pictures", "drag a thumbnail, or ◂ Move / Move ▸"),
+            ("Must-have features / features to avoid", "one feature per line (green / red box)"),
+        ]
+        html = "<table cellspacing=6>"
+        for a, b in rows:
+            html += (f"<tr><td colspan=2><b>{a}</b></td></tr>" if not b
+                     else f"<tr><td>{a}</td><td><code>{b}</code></td></tr>")
+        html += "</table>"
+        QMessageBox.information(self, "Keyboard shortcuts", html)
+
+    def show_about(self) -> None:
+        QMessageBox.about(self, APP_NAME,
+                          f"<b>{APP_NAME}</b> {APP_VERSION}<br>"
+                          "Plain-text structure trees with folding.<br>"
+                          "Files stay pure UTF-8 .txt.")
+
+    def closeEvent(self, e) -> None:
+        if not self.maybe_save():
+            e.ignore()
+            return
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("font_size", self.editor.font_size())
+        if self.details_area.isVisible() and not self._details_default_width:
+            # only a width the user chose by dragging the divider is remembered
+            self.settings.setValue("details_splitter", self.main_splitter.saveState())
+        self.settings.setValue("details_sections", self.details_panel.splitter.saveState())
+        self.item_store.cleanup()            # pictures added but never saved
+        e.accept()
+
+
+# --------------------------------------------------------------------------- #
+def _migrate_old_settings(new: QSettings) -> None:
+    """Carry over preferences saved under the app's previous name (Tree Editor)."""
+    if new.allKeys():
+        return
+    old = QSettings("TreeEditor", "TreeEditor")
+    for key in old.allKeys():
+        new.setValue(key, old.value(key))
+    new.sync()
+
+
+def _install_excepthook() -> None:
+    def hook(exc_type, exc, tb):
+        msg = "".join(traceback.format_exception(exc_type, exc, tb))
+        sys.stderr.write(msg)
+        if QApplication.instance() is not None:
+            QMessageBox.critical(None, f"{APP_NAME} - unexpected error",
+                                 "Something went wrong. Your text is still in the editor; "
+                                 "save it under a new name to be safe.\n\n" + msg[-2500:])
+    sys.excepthook = hook
+
+
+def main() -> int:
+    app = QApplication(sys.argv)
+    if MODEL_ERROR is not None:
+        sys.stderr.write(MODEL_ERROR + "\n")
+        QMessageBox.critical(None, f"{APP_NAME} - cannot start", MODEL_ERROR)
+        return 1
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName("Nodeon")
+    ui_font = app.font()
+    if ui_font.pointSizeF() > 0:
+        ui_font.setPointSizeF(ui_font.pointSizeF() + 1)
+        app.setFont(ui_font)
+    _install_excepthook()
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+    win = MainWindow(path)
+    win.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

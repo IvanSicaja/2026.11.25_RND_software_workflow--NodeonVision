@@ -1,0 +1,8 @@
+project/
+│
+├── src/                          ➡️ Source code
+│   ├── main.py                   ➡️ Entry point
+│   └── a_really_long_module_name.py   ➡️ Long one
+├── docs/                         ➡️ Documentation
+│                                 ➡️ second line
+└── README.md                     ➡️ Overview

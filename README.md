@@ -1,0 +1,224 @@
+# Nodeon
+
+A PyCharm-style editor for plain-text structure trees. Files stay **pure UTF-8 `.txt`**
+with `│ ├── └──` lines and `➡️` explanations. Only `➡️` starts an explanation;
+`#` is ordinary text like every other character.
+
+## Run
+
+From the project root:
+
+```
+pip install -r draft_requirements_python-3.11.9.txt
+python main/main.py                                   # new tree
+python main/main.py data/example_project_tree.txt     # open a file
+```
+In PyCharm: open `main/main.py` and press Run. You can also drag a .txt file onto the window.
+
+Every toolbar button shows its keyboard shortcut underneath (hover for a longer description).
+
+## Project files
+
+| File | Purpose |
+|---|---|
+| `main/main.py` | The Nodeon application (window, toolbar, folding, shortcuts). **Start this.** |
+| `main/treemodel.py` | Required by main.py: reads, formats and edits the tree. Must stay next to main.py. |
+| `main/itemdetails.py` | Required by main.py: the **Item details** panel (pictures, must-have features, features to avoid) and its storage. Must stay next to main.py. |
+| `data/example_project_tree.txt` | Example tree to open in Nodeon. |
+| `tests/test_treemodel.py` | Tests for the tree logic and explanation alignment |
+| `<name>.txt.marks.json` | Created next to a tree when you use colour marks. |
+| `<name>.txt.items/` | Created next to a tree when items have pictures or features: `items.json` (which row has which pictures / features) and `images/` (copies of the pictures). |
+| `tests/test_gui.py` | Tests that drive the real app with keystrokes (headless, settings untouched) |
+| `tests/test_itemdetails.py` | Tests for the item database and picture storage |
+| `tests/test_item_panel.py` | Tests that drive the Item details panel, incl. random stress tests (pictures always stay with their row) |
+| `tests/test_automation/` | Complete, traceable verification package (requirements, test cases, system / BDD / web tests, CI pipelines in `ci/`, Docker) – see its README. |
+| `draft_requirements_python-3.11.9.txt` | Python dependencies (PySide6). |
+| `directory-structure-explained.md` | What belongs in which folder of this project. |
+| `git_light.txt` | The few Git commands needed for this project. |
+| `docs/01_skills-used/skills.txt` | Technologies and skills used in this project. |
+
+## Folding
+
+| Action | How |
+|---|---|
+| Collapse all / Expand all | `Alt+1` / `Alt+4` |
+| Collapse one level / Expand one level (whole document) | `Alt+2` / `Alt+3` |
+| Show exactly N levels | `Ctrl+1` … `Ctrl+9`, or the **Levels** box |
+| Toggle one branch | click ▼/▶ next to the line number, or `Ctrl+.` |
+| Collapse / expand a branch with everything inside | `Alt`+click the arrow, or `Ctrl+Shift+.` / `Ctrl+Shift+,` |
+| Open a folded branch | click its `⋯ N items` badge |
+
+## Editing
+
+| Action | How |
+|---|---|
+| New item on the same level | `Enter` at the end of a name, or `Ctrl+Enter` |
+| New sub-item | `Ctrl+Shift+Enter` (Enter on an open branch also adds a first sub-item) |
+| Insert empty line (vertical branch lines kept) | `Alt+Enter` (press again for more; `Ctrl+Z` to undo) |
+| Move right / left one level | `Tab` / `Shift+Tab` (or `Alt+Shift+→ / ←`) |
+| Move up / down (with all sub-items) | `Alt+Shift+↑ / ↓` |
+| Explanation: add or edit (and the name) | `Ctrl+Shift+E` (explanation only: `Ctrl+E`) |
+| Duplicate / delete a branch | `Ctrl+D` / `Ctrl+Shift+Delete` |
+| Paste several lines (from PDF, Word, web) | `Ctrl+V` – the first line goes where the cursor is, every further line becomes its own branch on the **same level** right below (inside an explanation: further explanation lines). Empty lines are skipped; the tree below stays intact; one `Ctrl+Z` undoes it |
+| Column selection on / off (like PyCharm) | `Alt+Shift+Insert` or the **Column select** button. Then `Shift+arrows` or drag with the mouse to select a rectangle over several lines; typing, `Tab` / `Shift+Tab`, `Backspace`, `Delete`, copy, cut and paste work on every row at once. `Esc` ends the rectangle; the status bar shows **COLUMN** while the mode is on |
+| Delete only the line at the cursor | `Ctrl+Q` – sub-items stay and move up one level; on an explanation or empty line only that line is deleted |
+| Finish a list | `Enter` on an empty item moves it one level left; `Backspace` removes it |
+| Split a name | `Enter` in the middle of a name |
+| Plain newline | `Shift+Enter` |
+| Move explanations left / right | `Alt+←` / `Alt+→` (selected lines, or the whole document if nothing is selected) |
+| Format document (auto-align all explanations) | `Ctrl+Alt+L` |
+| Find | `Ctrl+F`, `F3`, `Shift+F3` (folded branches open automatically) |
+
+Press `F1` in the app for the full shortcut list.
+
+## Colour marks (track what you explored)
+
+Colour only the **name** of a branch (tree lines and explanations stay as they are):
+
+| Colour | Meaning (standard legend) | Whole name | Word / selection |
+|---|---|---|---|
+| default text colour | Not checked yet (only mentioned) | `Alt+C` | `Alt+Shift+C` |
+| green | Accepted (checked by a human) | `Alt+G` | `Alt+Shift+G` |
+| orange | To be approved | `Alt+O` | `Alt+Shift+O` |
+| red | Rejected | `Alt+R` | `Alt+Shift+R` |
+| violet | Explanation (`➡️`, fixed colour) | – | – |
+| own colours | whatever you define | suggested `Alt+5` … `Alt+9` | `Alt+Shift+5` … `Alt+Shift+9` |
+
+All shortcuts and colours in this table can be changed in the legend (see below).
+
+Pressing the same colour key again removes the colour.
+
+Works on the line at the cursor or on every branch in a selection.
+Toolbar: **Mark line** (whole name, `Alt+G/O/R/C`) and **Mark words** (word at the cursor or
+selection, `Alt+Shift+G/O/R/C`); `C` = back to the default text colour. With the cursor on a space or a tree line nothing is coloured.
+
+**Colour only words** – put the cursor on a word (no selection needed), or select exact
+characters with the mouse or Shift+arrows, and add **Shift**: `Alt+Shift+G` (green), `Alt+Shift+O` (orange), `Alt+Shift+R` (red),
+`Alt+Shift+C` (default colour – also works on a word inside a name that has a whole-line colour). Same colours as above; works in names and explanations, over
+several lines, and never colours the tree lines. The colour stays on the words when you
+move branches, move explanations or edit other parts of the line; if you change the
+coloured word itself, its colour disappears (`Ctrl+Z` brings it back). Also in the toolbar
+(**Mark**), the Tree menu and the right-click menu. Marks follow a branch when you move it.
+
+The `.txt` stays pure text: marks are saved automatically in a small file next to it,
+`<name>.txt.marks.json`. Keep it with the `.txt` when you copy or share the tree.
+Explanations (`➡️`) are always shown in their own violet colour; they can never be
+coloured – the colour marks work on branch names only.
+
+## Colour legend and own colours
+
+The **legend** below the editor always shows every colour and what it means
+(hide / show it in **View → Show colour legend**). Click a colour in the legend for its
+commands and for **Edit meaning, colour & shortcuts…**; **Edit legend…** shows all colours
+in one list (add, edit, remove).
+
+For **every** colour – the default text colour, green, orange, red, the explanation colour
+and your own colours – you can change:
+
+* the **meaning** (the text in the legend and after the fixed command names
+  "Colour line:" / "Colour word / selection:"),
+* the **colour** (**Standard** goes back to the theme colour of light / dark mode),
+* the **shortcuts** for "whole name" and "word / selection" (**None** = no shortcut).
+  The explanation colour has no shortcuts – explanations are never coloured by a command.
+
+Shortcuts that are already used (by another colour, any other command, Copy / Paste or a
+menu), the same key for both commands, and keys that would type text (no Ctrl / Alt /
+F-key) are refused with a message saying why.
+
+**+ Add colour** adds an own colour with its meaning, e.g. *Same on both robots*. Free
+shortcuts are suggested (`Alt+5` … `Alt+9`, `Alt+Shift+5` … `Alt+Shift+9`); change them as
+you like. A colour or meaning that is already used is refused, so the legend stays
+unambiguous.
+
+**Remove colour** (own colours: legend menu, **Edit legend…** or the button in the colour
+window). If the colour is used, its names and words get the default text colour again. If
+the colour is also in your **default legend**, Nodeon asks whether to remove it
+**everywhere** (also from the default, so new trees no longer get it) or **only from this
+tree**.
+
+Each tree keeps its own legend in `<name>.txt.marks.json`.
+
+**Save as default** stores the current legend (meanings, colours, shortcuts, own colours) as
+the standard for **every new tree**, in `nodeon_colours.json` in your user settings folder
+(the exact path is shown in the tooltip and after saving). **Load default** adds the colours
+of that default legend to the tree that is open. To share one legend with a team, set the
+environment variable `NODEON_COLORS_FILE` to a common file.
+
+## Explanation alignment
+
+`Alt+→` / `Alt+←` move the `➡️` explanations of the selected lines (or the whole document):
+
+* Every explanation always keeps **at least 3 spaces** after the text of its line.
+* **Moving left:** all explanations move together in one column; one that reaches its
+  text stops there (3 spaces after it), the others stay aligned and keep moving.
+* **Moving right:** explanations held back by their text are picked up as the column
+  reaches them, so everything ends up in one vertical column, then moves together.
+* A multi-line explanation always moves as one block.
+* Your columns are kept when you save and when you add, move or edit branches.
+  `Ctrl+Alt+L` (Format document) re-aligns everything automatically, as before.
+
+## Item details: pictures and features of every item
+
+The panel on the right shows the item (row) at the cursor – handy for organizing things,
+e.g. what is where in your garage. Hide / show it with **View → Show item details**; drag
+the divider to change its width (remembered).
+
+| What | How |
+|---|---|
+| Add pictures | Drag & drop picture files (or a picture from a web page) onto the panel, click **+ Add images…** (several at once), or copy a picture and press `Ctrl+V` in the picture area |
+| Previous / next picture (slideshow) | `‹` / `›`, or `←` / `→` in the picture, or click a thumbnail |
+| Zoom | mouse wheel, `+` / `−` buttons or keys, **Fit** / `0` (whole picture), `1` (100 %); drag to move a zoomed picture |
+| Large view | double-click the picture (or `⤢`) – same navigation and zoom in a big window |
+| Change the order | drag a thumbnail, or `◂` / `▸` |
+| Remove a picture | **Remove** or `Delete` in the picture (asks first) |
+| Must-have features (green) | one feature per line – what the item, or a replacement you buy later, must have |
+| Features to avoid (red) | one feature per line – what you do not want |
+
+**Pictures and features stay with their row**: when you move it up / down, indent or
+outdent it, rename it, add or delete rows around it, and through Undo / Redo.
+
+**Saving**: pictures and features are part of the tree – they are saved with **File → Save**
+(the title shows `*` until then, and closing asks to save). They are stored next to the tree:
+
+```
+garage.txt                 the tree (stays pure text)
+garage.txt.items/
+    items.json             which row has which pictures and features
+    images/                copies of the added pictures (your originals are never moved)
+```
+
+Keep the `.items` folder with the `.txt` when you copy or share the tree (**Save As** copies it
+for you). Pictures removed from all items are deleted from `images/` when you save. If you
+close without saving, nothing in the folder changes. If `items.json` is ever damaged, Nodeon
+says so, keeps it as `items.json.unreadable-<date>` when you save, and deletes no pictures.
+
+While you type in the panel, tree shortcuts (e.g. `Ctrl+D`, `Ctrl+Q`, `Alt+G`) do nothing, so
+the tree cannot change by accident; `Ctrl+S` still saves.
+
+## Tests
+
+```
+python -m unittest discover tests
+```
+
+Complete verification (developer tests, system tests, BDD, web report, traceability, quality gate):
+
+```
+pip install -r tests/test_automation/requirements-test.txt
+bash tests/test_automation/tools/run_all.sh          # → RESULT: ALL GREEN
+```
+
+## Troubleshooting
+
+**"itemdetails.py could not be loaded"** – `main/itemdetails.py` must be next to `main.py`
+(replace all three files together when you update).
+
+**"treemodel.py was not found / is empty / is not Nodeon's file"** – `main.py` always loads
+the `treemodel.py` that sits in the **same folder** (`main/`). Make sure:
+
+* `main/treemodel.py` exists, is not empty, and starts with
+  `"""treemodel.py - pure-Python model for box-drawing tree text files`.
+* It is not a copy of `main.py` (both files are needed, with different content).
+* `main.py` and `treemodel.py` come from the same version (replace both together).
+
+`__pycache__/` folders can always be deleted safely; Python recreates them.

@@ -1,0 +1,1878 @@
+"""GUI tests for main/main.py (the Nodeon app) (runs headless, no window appears).
+
+Run from the project root:
+    python -m unittest discover tests
+Uses a temporary settings file, so your real Nodeon preferences are untouched.
+"""
+import json
+import os
+
+# Never touch the real default colour legend of the person running the tests.
+import shutil
+import sys
+import tempfile
+import unittest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "main"))
+
+try:
+    from PySide6.QtCore import QSettings, Qt
+    from PySide6.QtCore import QEvent, QPoint, QPointF, QTimer
+    from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QTextCursor
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QDialog
+except ImportError:                                     # pragma: no cover
+    QApplication = None
+
+if QApplication is not None:
+    import importlib.util
+    # Load main/main.py by its path: the name "main" alone could be confused
+    # with the main/ folder itself.
+    _spec = importlib.util.spec_from_file_location(
+        "nodeon_app", os.path.join(PROJECT_ROOT, "main", "main.py"))
+    app_module = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(app_module)
+    import treemodel as tm
+
+M = Qt.KeyboardModifier if QApplication is not None else None
+K = Qt.Key if QApplication is not None else None
+
+MK = "\u27a1\ufe0f"                       # explanation marker ➡️
+
+
+def u16(text):
+    """Length in Qt (UTF-16) units - the arrow counts as 2."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+SAMPLE = ("project/\n"
+          "│\n"
+          "├── src/                          # Source code\n"
+          "│   ├── main.py                   # Entry point\n"
+          "│   └── a_really_long_module_name.py  # Long one\n"
+          "├── docs/                         # Documentation\n"
+          "│                                 # second line\n"
+          "└── README.md                     # Overview").replace("#", MK)
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class GuiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.tmp = tempfile.mkdtemp(prefix="nodeon-test-")
+        ini = os.path.join(cls.tmp, "settings.ini")
+        cls._orig_settings = app_module.QSettings
+        app_module.QSettings = lambda *a: QSettings(ini, QSettings.Format.IniFormat)
+        cls.colours_file = os.path.join(cls.tmp, "default_colours.json")
+        cls._orig_env = os.environ.get(app_module.DEFAULT_COLOURS_ENV)
+        os.environ[app_module.DEFAULT_COLOURS_ENV] = cls.colours_file
+        # A message box that a test did not expect fails the test instead of
+        # waiting forever for a click.
+        cls._orig_box_exec = app_module.QMessageBox.exec
+
+        def unexpected(box):
+            raise AssertionError(f"unexpected message box: {box.text()}")
+        app_module.QMessageBox.exec = unexpected
+
+    @classmethod
+    def tearDownClass(cls):
+        app_module.QSettings = cls._orig_settings
+        app_module.QMessageBox.exec = cls._orig_box_exec
+        if cls._orig_env is None:
+            os.environ.pop(app_module.DEFAULT_COLOURS_ENV, None)
+        else:
+            os.environ[app_module.DEFAULT_COLOURS_ENV] = cls._orig_env
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def setUp(self):
+        if os.path.exists(self.colours_file):
+            os.remove(self.colours_file)
+        self.path = os.path.join(self.tmp, "tree.txt")
+        marks = self.path + ".marks.json"
+        if os.path.exists(marks):
+            os.remove(marks)
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(SAMPLE + "\n")
+        self.win = app_module.MainWindow(self.path)
+        self.win.show()
+        QTest.qWait(20)
+        self.ed = self.win.editor
+        self.ed.setFocus()
+
+    def tearDown(self):
+        self.ed.document().setModified(False)
+        self.win.close()
+        self.win.deleteLater()
+        QTest.qWait(10)
+
+    # helpers --------------------------------------------------------------
+    def lines(self):
+        return self.ed.toPlainText().split("\n")
+
+    def hash_cols(self):
+        return [l.index(MK) for l in self.lines() if MK in l]
+
+    def goto(self, line):
+        self.ed.setTextCursor(QTextCursor(self.ed.document().findBlockByNumber(line)))
+
+    def key(self, k, mods=None):
+        QTest.keyClick(self.ed, k, mods if mods is not None else M.NoModifier)
+        QTest.qWait(5)
+
+    # toolbar --------------------------------------------------------------
+    def test_explanation_button_label_and_tooltip(self):
+        buttons = {b._label: b for b in self.win.findChildren(app_module.ActionButton)}
+        self.assertIn("Explanation", buttons)
+        self.assertNotIn("Edit", buttons)
+        tip = buttons["Explanation"].defaultAction().toolTip()
+        self.assertIn("Explanation", tip)
+        self.assertIn("add or edit the explanation", tip)
+        self.assertIn("Explanations ←", buttons)
+        self.assertIn("Explanations →", buttons)
+        self.assertEqual(buttons["Explanations ←"]._keys(), "Alt+←")
+        self.assertEqual(buttons["Explanations →"]._keys(), "Alt+→")
+        labels = [b._label for b in self.win.findChildren(app_module.ActionButton)]
+        self.assertEqual(labels[-3:], ["Format", "Delete line", "Delete branch"])
+
+    def test_edit_shortcut_opens_dialog(self):
+        calls = []
+        orig = app_module.EditNodeDialog.exec
+        app_module.EditNodeDialog.exec = lambda d: (calls.append(1), QDialog.DialogCode.Rejected)[1]
+        try:
+            self.goto(2)
+            self.key(K.Key_E, M.ControlModifier | M.ShiftModifier)
+            self.key(K.Key_E, M.ControlModifier)
+            self.key(K.Key_F2)
+        finally:
+            app_module.EditNodeDialog.exec = orig
+        self.assertEqual(len(calls), 2)
+
+    # explanation alignment ----------------------------------------------
+    def test_alt_right_whole_document_aligns(self):
+        before = self.hash_cols()
+        self.assertEqual(len(set(before)), 2)            # the long line is out of line
+        # The long line has only 2 spaces before "#", so it is held at 3 spaces
+        # (column 39); the others reach that column after 5 presses.
+        for _ in range(4):
+            self.key(K.Key_Right, M.AltModifier)
+        self.assertEqual(self.hash_cols(), [38, 38, 39, 38, 38, 38])
+        self.key(K.Key_Right, M.AltModifier)
+        self.assertEqual(self.hash_cols(), [39] * 6)       # everything in one column
+        self.key(K.Key_Right, M.AltModifier)
+        self.assertEqual(self.hash_cols(), [40] * 6)       # then all move together
+
+    def test_alt_left_stops_three_spaces_after_text(self):
+        for _ in range(60):
+            self.key(K.Key_Left, M.AltModifier)
+        for line in self.lines():
+            if MK in line:
+                text = line[:line.index(MK)]
+                self.assertTrue(text.endswith("   "), repr(line))
+                self.assertFalse(text.endswith("    ") and text.strip("│ "), repr(line))
+        # explanation lines of one branch stay together
+        docs = [l for l in self.lines() if "Documentation" in l or "second line" in l]
+        self.assertEqual(docs[0].index(MK), docs[1].index(MK))
+
+    def test_selection_only_moves_selected_and_is_kept(self):
+        before = self.lines()
+        cur = QTextCursor(self.ed.document().findBlockByNumber(2))
+        end = self.ed.document().findBlockByNumber(3)
+        cur.setPosition(end.position() + 5, QTextCursor.MoveMode.KeepAnchor)
+        self.ed.setTextCursor(cur)
+        self.key(K.Key_Right, M.AltModifier)
+        self.key(K.Key_Right, M.AltModifier)
+        after = self.lines()
+        self.assertEqual(after[2].index(MK), before[2].index(MK) + 2)
+        self.assertEqual(after[3].index(MK), before[3].index(MK) + 2)
+        self.assertEqual(after[5:], before[5:])             # other lines untouched
+        sel = self.ed.textCursor()
+        self.assertTrue(sel.hasSelection())
+        self.assertEqual(self.ed.document().findBlock(sel.anchor()).blockNumber(), 2)
+        self.assertEqual(sel.blockNumber(), 3)
+
+    def test_undo_restores(self):
+        before = self.ed.toPlainText()
+        self.key(K.Key_Right, M.AltModifier)
+        self.assertNotEqual(self.ed.toPlainText(), before)
+        self.key(K.Key_Z, M.ControlModifier)
+        self.assertEqual(self.ed.toPlainText(), before)
+
+    def test_save_keeps_manual_columns(self):
+        for _ in range(5):
+            self.key(K.Key_Right, M.AltModifier)
+        expected = self.ed.toPlainText()
+        self.assertTrue(self.win.save())
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), expected + "\n")
+
+    def test_structural_edit_keeps_manual_columns(self):
+        for _ in range(5):
+            self.key(K.Key_Right, M.AltModifier)
+        col = self.hash_cols()[0]
+        self.goto(7)
+        self.key(K.Key_Up, M.AltModifier | M.ShiftModifier)
+        self.assertEqual(set(self.hash_cols()), {col})
+
+    def test_format_document_still_auto_aligns(self):
+        for _ in range(5):
+            self.key(K.Key_Right, M.AltModifier)
+        self.key(K.Key_L, M.ControlModifier | M.AltModifier)
+        self.assertEqual(self.ed.toPlainText(), tm.format_text(SAMPLE))
+
+    def test_folds_survive_alignment(self):
+        self.ed.show_to_level(1)
+        hidden = sum(1 for i in range(self.ed.document().blockCount())
+                     if not self.ed.document().findBlockByNumber(i).isVisible())
+        self.key(K.Key_Right, M.AltModifier)
+        hidden2 = sum(1 for i in range(self.ed.document().blockCount())
+                      if not self.ed.document().findBlockByNumber(i).isVisible())
+        self.assertEqual(hidden, hidden2)
+        self.assertGreater(hidden, 0)
+
+    def test_no_explanations_message(self):
+        self.ed.set_document_text("root/\n└── a")
+        before = self.ed.toPlainText()
+        self.key(K.Key_Right, M.AltModifier)
+        self.assertEqual(self.ed.toPlainText(), before)
+
+    # empty spacer lines (Alt+Enter) -----------------------------------------
+    SPACER_SRC = "r/\n├── a/\n│   ├── a1      " + MK + " one\n│   └── a2\n├── b\n└── c"
+
+    def _spacer_doc(self):
+        self.ed.set_document_text(self.SPACER_SRC)
+
+    def test_alt_enter_between_siblings(self):
+        self._spacer_doc()
+        self.goto(2)                                     # a1
+        self.key(K.Key_Return, M.AltModifier)
+        self.assertEqual(self.lines()[:5], ["r/", "├── a/", "│   ├── a1      " + MK + " one", "│   │", "│   └── a2"])
+        self.assertEqual(self.ed.textCursor().blockNumber(), 3)   # cursor on the new line
+        self.key(K.Key_Return, M.AltModifier)            # again: one more empty line
+        self.assertEqual(self.lines()[3:6], ["│   │", "│   │", "│   └── a2"])
+
+    def test_alt_enter_on_open_branch_and_last_child(self):
+        self._spacer_doc()
+        self.goto(1)                                     # a/ (open) -> before a1
+        self.key(K.Key_Return, M.AltModifier)
+        self.assertEqual(self.lines()[1:4], ["├── a/", "│   │", "│   ├── a1      " + MK + " one"])
+        self.assertEqual(self.lines()[4], "│   └── a2")
+        self.goto(4)                                     # a2 (last child) -> before b
+        self.key(K.Key_Return, M.AltModifier)
+        self.assertEqual(self.lines()[4:7], ["│   └── a2", "│", "├── b"])
+
+    def test_alt_enter_on_collapsed_branch_goes_below_it(self):
+        self._spacer_doc()
+        self.ed.toggle_fold(1)                           # fold a/
+        self.goto(1)
+        self.key(K.Key_Return, M.AltModifier)
+        self.assertEqual(self.lines()[4:6], ["│", "├── b"])
+        self.assertIn(1, self.ed.collapsed_headers())    # fold kept
+
+    def test_alt_enter_last_line_undo_and_keys_kept(self):
+        self._spacer_doc()
+        self.goto(5)                                     # c, last line
+        self.key(K.Key_Return, M.AltModifier)
+        self.assertEqual(self.lines()[-1], "")
+        self.key(K.Key_Z, M.ControlModifier)
+        self.assertEqual(self.ed.toPlainText(), self.SPACER_SRC)
+        # plain Enter still creates the next item, Shift+Enter a raw newline
+        self.goto(4)
+        self.ed.moveCursor(QTextCursor.MoveOperation.EndOfBlock)
+        self.key(K.Key_Return)
+        self.assertEqual(self.lines()[5], "├── ")
+        self.assertIn("Empty line", [b._label for b in self.win.findChildren(app_module.ActionButton)])
+
+    def test_alt_enter_save_round_trip(self):
+        self._spacer_doc()
+        self.goto(2)
+        self.key(K.Key_Return, M.AltModifier)
+        expected = self.ed.toPlainText()
+        self.win.path = self.path
+        self.assertTrue(self.win.save())
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), expected + "\n")
+
+    # colour marks ------------------------------------------------------------
+    def color_at(self, line, text):
+        """Foreground colour (hex) of `text` in `line` as drawn on screen."""
+        block = self.ed.document().findBlockByNumber(line)
+        pos = block.text().index(text)
+        for r in block.layout().formats():
+            if r.start <= pos < r.start + r.length:
+                return r.format.foreground().color().name()
+        return None
+
+    def mark(self, line, key):
+        self.goto(line)
+        self.key(key, M.AltModifier)
+
+    def test_mark_colours_only_the_name(self):
+        theme = self.ed.theme
+        text_before = self.ed.toPlainText()
+        self.mark(2, K.Key_G)                       # src/
+        self.assertEqual(self.color_at(2, "src/"), QColor(theme.mark_checked).name())
+        self.assertEqual(self.color_at(2, MK + " Source"), QColor(theme.comment).name())
+        self.assertEqual(self.color_at(2, "├──"), QColor(theme.guide).name())
+        self.assertEqual(self.ed.toPlainText(), text_before)       # text unchanged
+        self.assertFalse(self.ed.document().isModified())
+        self.mark(3, K.Key_O)
+        self.assertEqual(self.color_at(3, "main.py"), QColor(theme.mark_explore).name())
+        self.mark(7, K.Key_R)
+        self.assertEqual(self.color_at(7, "README.md"), QColor(theme.mark_problem).name())
+
+    def test_comment_colour_is_not_text_or_mark_colour(self):
+        t = self.ed.theme
+        self.assertEqual(self.color_at(2, MK + " Source"), QColor(t.comment).name())
+        others = {QColor(c).name() for c in (t.fg, t.file, t.mark_checked,
+                                                t.mark_explore, t.mark_problem)}
+        self.assertNotIn(QColor(t.comment).name(), others)
+
+    def test_same_key_again_and_alt_c_remove(self):
+        self.mark(2, K.Key_G)
+        self.mark(2, K.Key_G)
+        self.assertEqual(self.color_at(2, "src/"), QColor(self.ed.theme.folder).name())
+        self.mark(2, K.Key_R)
+        self.mark(2, K.Key_C)
+        self.assertEqual(self.color_at(2, "src/"), QColor(self.ed.theme.folder).name())
+        self.assertEqual(self.ed.export_marks(), [])
+
+    def test_mark_selection(self):
+        cur = QTextCursor(self.ed.document().findBlockByNumber(2))
+        cur.setPosition(self.ed.document().findBlockByNumber(4).position() + 3,
+                        QTextCursor.MoveMode.KeepAnchor)
+        self.ed.setTextCursor(cur)
+        self.key(K.Key_O, M.AltModifier)
+        self.assertEqual(len(self.ed.export_marks()), 3)
+        self.assertTrue(self.ed.textCursor().hasSelection())
+
+    def test_marks_follow_branches_and_undo(self):
+        self.mark(7, K.Key_R)                       # README.md
+        self.mark(5, K.Key_G)                       # docs/
+        self.goto(7)
+        self.key(K.Key_Up, M.AltModifier | M.ShiftModifier)   # README above docs
+        readme = [i for i, l in enumerate(self.lines()) if "README" in l][0]
+        docs = [i for i, l in enumerate(self.lines()) if "docs/" in l][0]
+        self.assertEqual(self.color_at(readme, "README.md"), QColor(self.ed.theme.mark_problem).name())
+        self.assertEqual(self.color_at(docs, "docs/"), QColor(self.ed.theme.mark_checked).name())
+        self.key(K.Key_Z, M.ControlModifier)
+        QTest.qWait(300)                            # let the editor re-read the text
+        self.assertEqual(self.color_at(7, "README.md"), QColor(self.ed.theme.mark_problem).name())
+        self.assertEqual(self.color_at(5, "docs/"), QColor(self.ed.theme.mark_checked).name())
+
+    def test_mark_survives_typing_and_folding(self):
+        self.mark(2, K.Key_G)
+        self.ed.toggle_fold(2)
+        self.assertIn(2, self.ed.collapsed_headers())
+        self.assertEqual(self.color_at(2, "src/"), QColor(self.ed.theme.mark_checked).name())
+        self.ed.toggle_fold(2)
+        self.goto(2)
+        self.ed.moveCursor(QTextCursor.MoveOperation.EndOfBlock)
+        QTest.keyClicks(self.ed, " more")
+        QTest.qWait(300)
+        self.assertEqual(self.color_at(2, "src/"), QColor(self.ed.theme.mark_checked).name())
+        self.assertNotIn(2, self.ed.collapsed_headers())
+
+    def test_marks_saved_next_to_file_and_reloaded(self):
+        self.mark(2, K.Key_G)
+        self.mark(7, K.Key_O)
+        marks_file = self.path + ".marks.json"
+        self.assertTrue(os.path.isfile(marks_file))           # stored right away
+        with open(self.path, encoding="utf-8") as f:
+            self.assertNotIn("checked", f.read())              # .txt stays pure text
+        self.win.close()
+        win2 = app_module.MainWindow(self.path)
+        try:
+            marks = dict(win2.editor.export_marks())
+            self.assertEqual(sorted(marks.values()), [app_module.MARK_CHECKED,
+                                                      app_module.MARK_EXPLORE])
+            # removing the last marks deletes the marks file
+            for line in (2, 7):
+                c = QTextCursor(win2.editor.document().findBlockByNumber(line))
+                win2.editor.setTextCursor(c)
+                win2.editor.mark_selection(app_module.MARK_NONE)
+            self.assertFalse(os.path.exists(marks_file))
+        finally:
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_broken_marks_file_is_ignored(self):
+        self.win.close()
+        with open(self.path + ".marks.json", "w", encoding="utf-8") as f:
+            f.write("{ not json")
+        win2 = app_module.MainWindow(self.path)
+        try:
+            self.assertEqual(win2.editor.export_marks(), [])
+            self.assertIn("could not be read", win2.statusBar().currentMessage())
+        finally:
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_mark_toolbar_and_shortcut_texts(self):
+        labels = {b._label: b for b in self.win.findChildren(app_module.ActionButton)}
+        self.assertIn("Mark line", labels)
+        self.assertIn("Mark words", labels)
+        self.assertEqual(labels["Mark line"]._keys(), "Alt+G/O/R/C")
+        self.assertEqual(labels["Mark words"]._keys(), "Alt+Shift+G/O/R/C")
+        self.assertEqual(labels["Mark line"].menu().actions(), self.win.mark_actions)
+        self.assertEqual(labels["Mark words"].menu().actions(), self.win.word_actions)
+        self.assertEqual([app_module.shortcut_text(a) for a in self.win.word_actions],
+                         ["Alt+Shift+G", "Alt+Shift+O", "Alt+Shift+R", "Alt+Shift+C"])
+        # two different icons
+        img1 = labels["Mark line"].defaultAction().icon().pixmap(24, 24).toImage()
+        img2 = labels["Mark words"].defaultAction().icon().pixmap(24, 24).toImage()
+        self.assertFalse(img1.isNull())
+        self.assertFalse(img2.isNull())
+        self.assertNotEqual(img1, img2)
+        self.assertEqual([app_module.shortcut_text(a) for a in self.win.mark_actions],
+                         ["Alt+G", "Alt+O", "Alt+R", "Alt+C"])
+
+    # coloured words (names only) --------------------------------------------
+    def select(self, line, start_text, end_text=None, end_line=None):
+        """Select from start_text in `line` to the end of end_text (in end_line)."""
+        doc = self.ed.document()
+        b1 = doc.findBlockByNumber(line)
+        b2 = doc.findBlockByNumber(line if end_line is None else end_line)
+        end_text = end_text or start_text
+        cur = QTextCursor(doc)
+        cur.setPosition(b1.position() + u16(b1.text()[:b1.text().index(start_text)]))
+        e = b2.text().index(end_text) + len(end_text)
+        cur.setPosition(b2.position() + u16(b2.text()[:e]), QTextCursor.MoveMode.KeepAnchor)
+        self.ed.setTextCursor(cur)
+
+    def colors_of(self, line, text):
+        """Colour of every character of `text` in `line`."""
+        block = self.ed.document().findBlockByNumber(line)
+        t = block.text()
+        start = u16(t[:t.index(text)])
+        out = []
+        for pos in range(start, start + u16(text)):
+            col = None
+            for r in block.layout().formats():
+                if r.start <= pos < r.start + r.length:
+                    col = r.format.foreground().color().name()
+            out.append(col)
+        return out
+
+    def c(self, attr):
+        return QColor(getattr(self.ed.theme, attr)).name()
+
+    def cursor_at(self, line, text, offset):
+        b = self.ed.document().findBlockByNumber(line)
+        cur = QTextCursor(b)
+        cur.setPosition(b.position() + u16(b.text()[:b.text().index(text) + offset]))
+        self.ed.setTextCursor(cur)
+
+    W = (M.AltModifier | M.ShiftModifier) if M is not None else None
+
+    def test_word_colour_only_selection_in_name(self):
+        before = self.ed.toPlainText()
+        self.select(4, "really")                              # part of a name
+        self.key(K.Key_G, self.W)
+        self.assertEqual(set(self.colors_of(4, "really")), {self.c("mark_checked")})
+        self.assertEqual(set(self.colors_of(4, "a_")), {self.c("file")})
+        self.assertEqual(set(self.colors_of(4, "_long_module_name.py")), {self.c("file")})
+        self.assertEqual(self.ed.toPlainText(), before)
+        self.assertTrue(self.ed.textCursor().hasSelection())    # selection kept
+
+    def test_word_all_colours(self):
+        for key, attr, line, word in ((K.Key_G, "mark_checked", 2, "src/"),
+                                      (K.Key_O, "mark_explore", 3, "main.py"),
+                                      (K.Key_R, "mark_problem", 7, "README.md")):
+            self.select(line, word)
+            self.key(key, self.W)
+            self.assertEqual(set(self.colors_of(line, word)), {self.c(attr)})
+
+    # explanations can never be coloured ---------------------------------------
+    def test_explanation_selection_is_never_coloured(self):
+        for key in (K.Key_G, K.Key_O, K.Key_R, K.Key_C):
+            self.select(2, "Source code")
+            self.key(key, self.W)
+            self.assertEqual(set(self.colors_of(2, "Source code")), {self.c("comment")})
+        self.assertIn("explanations always keep", self.win.statusBar().currentMessage())
+        self.assertEqual(self.ed.export_spans(), [])
+        self.assertFalse(os.path.exists(self.path + ".marks.json"))
+
+    def test_explanation_word_at_cursor_is_never_coloured(self):
+        for line, word in ((2, "Source"), (6, "second"), (7, "Overview")):
+            self.cursor_at(line, word, 2)
+            self.key(K.Key_G, self.W)
+            self.assertEqual(set(self.colors_of(line, word)), {self.c("comment")})
+        self.assertIn("No word at the cursor", self.win.statusBar().currentMessage())
+        self.assertEqual(self.ed.export_spans(), [])
+
+    def test_selection_over_name_and_explanation_colours_only_name(self):
+        self.select(2, "├──", "code")                          # lines + name + explanation
+        self.key(K.Key_G, self.W)
+        self.assertEqual(set(self.colors_of(2, "├──")), {self.c("guide")})
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.c("mark_checked")})
+        self.assertEqual(set(self.colors_of(2, MK + " Source code")), {self.c("comment")})
+
+    def test_selection_over_several_lines(self):
+        self.select(3, "main.py", "Overview", end_line=7)
+        self.key(K.Key_R, self.W)
+        for line, name in ((3, "main.py"), (4, "a_really_long_module_name.py"),
+                           (5, "docs/"), (7, "README.md")):
+            self.assertEqual(set(self.colors_of(line, name)), {self.c("mark_problem")})
+        for line, text in ((3, "Entry point"), (6, "second line"), (7, "Overview")):
+            self.assertEqual(set(self.colors_of(line, text)), {self.c("comment")})
+
+    def test_line_mark_never_colours_explanation(self):
+        for key in (K.Key_G, K.Key_O, K.Key_R):
+            self.mark(2, key)
+            self.assertEqual(set(self.colors_of(2, "Source code")), {self.c("comment")})
+            self.mark(2, K.Key_C)
+
+    def test_old_explanation_colours_in_marks_file_are_ignored(self):
+        self.win.close()
+        data = {"app": "Nodeon", "version": 1, "marks": [],
+                "words": [{"path": [["project/", 0], ["src/", 0]], "part": "c0", "start": 0,
+                           "end": 6, "text": "Source", "mark": "checked"},
+                          {"path": [["project/", 0], ["src/", 0]], "part": "name", "start": 0,
+                           "end": 3, "text": "src", "mark": "problem"}]}
+        with open(self.path + ".marks.json", "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        win2 = app_module.MainWindow(self.path)
+        old = self.ed
+        try:
+            self.ed = win2.editor
+            self.assertEqual(set(self.colors_of(2, "Source")), {self.c("comment")})
+            self.assertEqual(set(self.colors_of(2, "src")), {self.c("mark_problem")})
+            self.assertEqual([sp[0] for _k, sp in win2.editor.export_spans()], ["name"])
+        finally:
+            self.ed = old
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_comment_colour_comes_from_theme(self):
+        for dark in (True, False):
+            self.win._set_dark(dark)
+            self.assertEqual(set(self.colors_of(2, "Source code")), {self.c("comment")})
+
+    # word at the cursor (names) ------------------------------------------------
+    def test_cursor_inside_name_word(self):
+        self.cursor_at(4, "a_really_long_module_name.py", 6)
+        pos = self.ed.textCursor().position()
+        self.key(K.Key_G, self.W)
+        self.assertEqual(set(self.colors_of(4, "a_really_long_module_name.py")),
+                         {self.c("mark_checked")})
+        self.assertEqual(self.ed.textCursor().position(), pos)    # cursor not moved
+        self.assertFalse(self.ed.textCursor().hasSelection())
+        self.assertIn("Word at cursor", self.win.statusBar().currentMessage())
+
+    def test_cursor_at_name_borders(self):
+        self.cursor_at(7, "README.md", 0)                       # |README.md
+        self.key(K.Key_O, self.W)
+        self.assertEqual(set(self.colors_of(7, "README.md")), {self.c("mark_explore")})
+        self.cursor_at(3, "main.py", 7)                         # main.py|
+        self.key(K.Key_R, self.W)
+        self.assertEqual(set(self.colors_of(3, "main.py")), {self.c("mark_problem")})
+
+    def test_word_nothing_on_tree_lines_or_spaces(self):
+        self.goto(2)                                            # column 0: "├──"
+        self.key(K.Key_G, self.W)
+        self.assertIn("No word at the cursor", self.win.statusBar().currentMessage())
+        self.cursor_at(2, "src/", 6)                            # spaces after the name
+        self.key(K.Key_G, self.W)
+        self.goto(1)                                            # spacer line "│"
+        self.key(K.Key_G, self.W)
+        self.assertEqual(self.ed.export_spans(), [])
+
+    def test_cursor_toggle_recolour_and_default(self):
+        self.cursor_at(7, "README.md", 3)
+        self.key(K.Key_G, self.W)
+        self.key(K.Key_G, self.W)                               # same again = remove
+        self.assertEqual(set(self.colors_of(7, "README.md")), {self.c("file")})
+        self.key(K.Key_O, self.W)
+        self.key(K.Key_R, self.W)                               # recolour
+        self.assertEqual(set(self.colors_of(7, "README.md")), {self.c("mark_problem")})
+        self.key(K.Key_C, self.W)                               # default colour
+        self.assertEqual(set(self.colors_of(7, "README.md")), {self.c("file")})
+        self.assertEqual(self.ed.export_spans(), [])
+
+    def test_partial_remove_and_recolour_partly_coloured_word(self):
+        self.select(4, "a_really_long")
+        self.key(K.Key_G, self.W)
+        self.select(4, "long")
+        self.key(K.Key_C, self.W)
+        self.assertEqual(set(self.colors_of(4, "a_really_")), {self.c("mark_checked")})
+        self.assertEqual(set(self.colors_of(4, "long_module")), {self.c("file")})
+        self.cursor_at(4, "module", 2)
+        self.key(K.Key_O, self.W)                               # whole word recoloured
+        self.assertEqual(set(self.colors_of(4, "a_really_long_module_name.py")),
+                         {self.c("mark_explore")})
+
+    def test_selection_still_wins_over_word(self):
+        self.select(4, "really_lo")
+        self.key(K.Key_G, self.W)
+        self.assertEqual(set(self.colors_of(4, "really_lo")), {self.c("mark_checked")})
+        self.assertEqual(set(self.colors_of(4, "ng_module")), {self.c("file")})
+
+    # default colour ----------------------------------------------------------
+    def test_default_colour_in_both_menus(self):
+        self.assertIn("Default colour", self.win.a_mark_clear.text())
+        self.assertIn("Default colour", self.win.a_word_clear.text())
+        self.assertIn(self.win.a_mark_clear, self.win.mark_menu.actions())
+        self.assertIn(self.win.a_word_clear, self.win.words_menu.actions())
+        self.assertNotIn(self.win.a_word_clear, self.win.mark_menu.actions())
+        self.assertNotIn(self.win.a_mark_clear, self.win.words_menu.actions())
+        self.assertEqual(app_module.shortcut_text(self.win.a_mark_clear), "Alt+C")
+        self.assertEqual(app_module.shortcut_text(self.win.a_word_clear), "Alt+Shift+C")
+
+    def test_line_default_colour(self):
+        for key in (K.Key_G, K.Key_O, K.Key_R):
+            self.mark(7, key)
+            self.key(K.Key_C, M.AltModifier)
+            self.assertEqual(set(self.colors_of(7, "README.md")), {self.c("file")})
+            self.mark(2, key)
+            self.key(K.Key_C, M.AltModifier)
+            self.assertEqual(set(self.colors_of(2, "src/")), {self.c("folder")})
+        self.assertEqual(self.ed.export_marks(), [])
+        self.assertIn("default colour", self.win.statusBar().currentMessage())
+
+    def test_word_default_inside_line_coloured_name(self):
+        self.mark(4, K.Key_R)                                   # whole name red
+        self.select(4, "really")
+        self.key(K.Key_C, self.W)                               # just "really" default
+        self.assertEqual(set(self.colors_of(4, "really")), {self.c("file")})
+        self.assertEqual(set(self.colors_of(4, "a_")), {self.c("mark_problem")})
+        self.assertEqual(set(self.colors_of(4, "_long_module_name.py")), {self.c("mark_problem")})
+        self.mark(2, K.Key_G)
+        self.cursor_at(2, "src/", 1)
+        self.key(K.Key_C, self.W)
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.c("folder")})
+
+    def test_word_default_saved_and_reloaded(self):
+        self.mark(4, K.Key_R)
+        self.select(4, "really")
+        self.key(K.Key_C, self.W)
+        with open(self.path + ".marks.json", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual([(w["text"], w["mark"]) for w in data["words"]], [("really", "default")])
+        self.win.close()
+        win2 = app_module.MainWindow(self.path)
+        old = self.ed
+        try:
+            self.ed = win2.editor
+            self.assertEqual(set(self.colors_of(4, "really")), {self.c("file")})
+            self.assertEqual(set(self.colors_of(4, "a_")), {self.c("mark_problem")})
+        finally:
+            self.ed = old
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_line_command_overrides_word_defaults(self):
+        self.mark(4, K.Key_R)
+        self.select(4, "really")
+        self.key(K.Key_C, self.W)
+        self.mark(4, K.Key_G)
+        self.assertEqual(set(self.colors_of(4, "a_really_long_module_name.py")),
+                         {self.c("mark_checked")})
+        self.assertEqual(self.ed.export_spans(), [])
+        self.mark(4, K.Key_C)
+        self.assertEqual(set(self.colors_of(4, "a_really_long_module_name.py")), {self.c("file")})
+        self.assertEqual(self.ed.export_marks(), [])
+
+    def test_word_default_when_already_default(self):
+        self.cursor_at(7, "README.md", 2)
+        self.key(K.Key_C, self.W)
+        self.assertIn("already in the default colour", self.win.statusBar().currentMessage())
+        self.assertFalse(os.path.exists(self.path + ".marks.json"))
+        self.mark(4, K.Key_R)
+        self.select(4, "really")
+        self.key(K.Key_C, self.W)
+        self.select(4, "really")
+        self.key(K.Key_C, self.W)
+        self.assertIn("already in the default colour", self.win.statusBar().currentMessage())
+        self.assertEqual(len(self.ed.export_spans()), 1)
+
+    def test_word_and_line_mark_together(self):
+        self.mark(4, K.Key_R)
+        self.select(4, "module")
+        self.key(K.Key_G, self.W)
+        self.assertEqual(set(self.colors_of(4, "a_really")), {self.c("mark_problem")})
+        self.assertEqual(set(self.colors_of(4, "module")), {self.c("mark_checked")})
+
+    def test_word_follows_alignment_moves_and_edits(self):
+        self.select(5, "docs")
+        self.key(K.Key_O, self.W)
+        self.goto(0)
+        for _ in range(3):
+            self.key(K.Key_Right, M.AltModifier)                # explanations move
+        self.assertEqual(set(self.colors_of(5, "docs")), {self.c("mark_explore")})
+        self.goto(5)
+        self.key(K.Key_Up, M.AltModifier | M.ShiftModifier)     # move branch up
+        line = [i for i, l in enumerate(self.lines()) if "docs/" in l][0]
+        self.assertEqual(set(self.colors_of(line, "docs")), {self.c("mark_explore")})
+        b = self.ed.document().findBlockByNumber(line)
+        cur = QTextCursor(b)
+        cur.setPosition(b.position() + b.text().index("docs/") + 4)
+        self.ed.setTextCursor(cur)
+        QTest.keyClicks(self.ed, "_v2")                         # typing after the word
+        QTest.qWait(300)
+        self.assertIn("docs_v2/", self.lines()[line])
+        self.assertEqual(set(self.colors_of(line, "docs")), {self.c("mark_explore")})
+
+    def test_word_gone_when_edited_back_with_undo(self):
+        self.select(7, "README")
+        self.key(K.Key_R, self.W)
+        self.cursor_at(7, "README", 3)
+        QTest.keyClicks(self.ed, "X")                            # "REAXDME"
+        QTest.qWait(300)
+        self.assertEqual(set(self.colors_of(7, "REAXDME")), {self.c("file")})
+        self.key(K.Key_Z, M.ControlModifier)
+        QTest.qWait(300)
+        self.assertEqual(set(self.colors_of(7, "README")), {self.c("mark_problem")})
+
+    def test_word_colours_saved_and_reloaded(self):
+        self.select(2, "src")
+        self.key(K.Key_G, self.W)
+        self.select(4, "module")
+        self.key(K.Key_O, self.W)
+        marks_file = self.path + ".marks.json"
+        with open(marks_file, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(sorted(w["text"] for w in data["words"]), ["module", "src"])
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), SAMPLE + "\n")             # .txt untouched
+        self.win.close()
+        win2 = app_module.MainWindow(self.path)
+        old = self.ed
+        try:
+            self.ed = win2.editor
+            self.assertEqual(set(self.colors_of(2, "src")), {self.c("mark_checked")})
+            self.assertEqual(set(self.colors_of(4, "module")), {self.c("mark_explore")})
+            for line, word in ((2, "src"), (4, "module")):
+                self.select(line, word)
+                win2.editor.mark_words(app_module.MARK_NONE)
+            self.assertFalse(os.path.exists(marks_file))
+        finally:
+            self.ed = old
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_word_colour_hidden_lines_and_folding(self):
+        self.select(3, "main")
+        self.key(K.Key_G, self.W)
+        self.ed.toggle_fold(2)
+        self.ed.toggle_fold(2)
+        self.assertEqual(set(self.colors_of(3, "main")), {self.c("mark_checked")})
+
+    # delete one line (Ctrl+Q) ---------------------------------------------------
+    def test_ctrl_q_deletes_leaf_line_only(self):
+        self.goto(3)                                             # main.py
+        self.key(K.Key_Q, M.ControlModifier)
+        self.assertEqual(self.lines(), [
+            "project/", "│",
+            "├── src/                          " + MK + " Source code",
+            "│   └── a_really_long_module_name.py   " + MK + " Long one",   # 3-space minimum
+            "├── docs/                         " + MK + " Documentation",
+            "│                                 " + MK + " second line",
+            "└── README.md                     " + MK + " Overview"])
+        self.assertTrue(self.win.isVisible())                      # Ctrl+Q no longer quits
+        self.assertEqual(self.ed.textCursor().blockNumber(), 3)
+
+    def test_ctrl_q_on_branch_keeps_sub_items(self):
+        self.goto(2)                                             # src/ with 2 sub-items
+        self.key(K.Key_Q, M.ControlModifier)
+        lines = self.lines()
+        self.assertNotIn("src/", "\n".join(lines))
+        self.assertTrue(any(l.startswith("├── main.py") for l in lines))
+        self.assertTrue(any(l.startswith("├── a_really_long_module_name.py") for l in lines))
+        self.assertEqual(len(lines), 7)
+        self.assertIn("sub-items kept", self.win.statusBar().currentMessage())
+        self.key(K.Key_Z, M.ControlModifier)                     # one undo step
+        self.assertEqual(self.ed.toPlainText(), SAMPLE)
+
+    def test_ctrl_q_on_explanation_and_empty_lines(self):
+        self.goto(6)                                             # 2nd explanation line of docs/
+        self.key(K.Key_Q, M.ControlModifier)
+        self.assertNotIn("second line", self.ed.toPlainText())
+        self.assertIn("Documentation", self.ed.toPlainText())
+        self.goto(1)                                             # empty spacer line
+        self.key(K.Key_Q, M.ControlModifier)
+        self.assertEqual(self.lines()[:2], ["project/", "├── src/                          "
+                                            + MK + " Source code"])
+
+    def test_ctrl_q_last_line_and_collapsed_branch(self):
+        self.goto(7)
+        self.key(K.Key_Q, M.ControlModifier)
+        self.assertNotIn("README", self.ed.toPlainText())
+        # docs/ is now the last branch, so no vertical line continues below it
+        self.assertEqual(self.lines()[-1], " " * 34 + MK + " second line")
+        self.ed.toggle_fold(2)                                   # fold src/
+        self.goto(2)
+        self.key(K.Key_Q, M.ControlModifier)
+        self.assertIn("main.py", self.ed.toPlainText())
+        visible = [self.ed.document().findBlockByNumber(i).isVisible()
+                   for i in range(self.ed.document().blockCount())]
+        self.assertTrue(all(visible))                             # lifted items are visible
+
+    def test_ctrl_q_marks_follow_lifted_items(self):
+        self.mark(3, K.Key_G)                                    # main.py green
+        self.goto(2)
+        self.key(K.Key_Q, M.ControlModifier)
+        line = [i for i, l in enumerate(self.lines()) if "main.py" in l][0]
+        self.assertEqual(set(self.colors_of(line, "main.py")), {self.c("mark_checked")})
+
+    def test_ctrl_q_root_and_toolbar(self):
+        self.goto(0)                                             # project/ (top level)
+        self.key(K.Key_Q, M.ControlModifier)
+        top = [l for l in self.lines() if l and l[0] not in "│├└ "]
+        self.assertEqual(top, ["src/                              " + MK + " Source code",
+                               "docs/                             " + MK + " Documentation",
+                               "README.md                         " + MK + " Overview"])
+        labels = [b._label for b in self.win.findChildren(app_module.ActionButton)]
+        self.assertEqual(labels[-3:], ["Format", "Delete line", "Delete branch"])
+        self.assertEqual(app_module.shortcut_text(self.win.a_delete_line), "Ctrl+Q")
+        self.assertEqual(self.win.a_quit.shortcuts(), [])
+        self.assertFalse(self.win.a_delete_line.icon().isNull())
+
+    # the ➡️ marker -------------------------------------------------------------
+    def test_hash_is_normal_text_everywhere(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("project/\n├── src/   # not an explanation\n└── C# notes\n")
+        self.win.load_file(self.path)
+        # "#" text is part of the name: name colour, never the explanation colour
+        self.assertEqual(set(self.colors_of(1, "src/   # not an explanation")), {self.c("file")})
+        self.assertEqual(set(self.colors_of(2, "C# notes")), {self.c("file")})
+        self.assertTrue(all(not n.comment for n in self.ed._model.iter_nodes()))
+        self.assertTrue(self.win.save())
+        with open(self.path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertEqual(text, "project/\n├── src/   # not an explanation\n└── C# notes\n")
+        self.assertNotIn(MK, text)                                # nothing converted
+        # "#" can be coloured like any other character of a name
+        self.select(1, "# not")
+        self.key(K.Key_R, self.W)
+        self.assertEqual(set(self.colors_of(1, "# not")), {self.c("mark_problem")})
+
+    def test_typing_hash_vs_arrow(self):
+        self.ed.set_document_text("root/\n└── a")
+        self.goto(1)
+        self.ed.moveCursor(QTextCursor.MoveOperation.EndOfBlock)
+        QTest.keyClicks(self.ed, "   # hash text")
+        QTest.qWait(300)
+        self.assertEqual(set(self.colors_of(1, "# hash text")), {self.c("file")})
+        # QTest can only simulate ASCII keys, so the arrow is inserted the way the
+        # emoji keyboard / paste does it.
+        self.ed.insertPlainText("   " + MK + " real explanation")
+        QTest.qWait(300)
+        self.assertEqual(set(self.colors_of(1, MK + " real explanation")), {self.c("comment")})
+        self.assertEqual(set(self.colors_of(1, "# hash text")), {self.c("file")})
+        node = self.ed._map.node_at(1)
+        self.assertEqual((node.name, node.comment), ("a   # hash text", ["real explanation"]))
+
+    def test_alignment_ignores_hash(self):
+        self.ed.set_document_text("r/\n├── a # x   " + MK + " one\n└── b       " + MK + " two")
+        self.goto(0)
+        self.key(K.Key_Right, M.AltModifier)
+        cols = [l.index(MK) for l in self.lines() if MK in l]
+        self.assertEqual(len(set(cols)), 1)                       # aligned on ➡️ only
+        self.assertIn("├── a # x", self.lines()[1])
+
+    def test_new_explanation_written_with_arrow(self):
+        self.ed.set_document_text("root/\n└── a")
+        self.goto(1)
+        node = self.ed._map.node_at(1)
+
+        def op(n):
+            node.comment = ["new one"]
+            return node, "end"
+        self.ed.run_op(op, require_node=False)
+        self.assertTrue(self.lines()[1].endswith(MK + " new one"))
+        self.assertEqual(set(self.colors_of(1, MK + " new one")), {self.c("comment")})
+
+    # pasting several lines (PDF / Word) ------------------------------------------
+    PASTE_SRC = ("r/\n├── a/\n│   ├── a1\n│   └── a2\n├── empty\n└── z/\n    └── z1")
+
+    def paste(self, text):
+        QApplication.clipboard().setText(text)
+        self.key(K.Key_V, M.ControlModifier)
+        QTest.qWait(10)
+
+    def tree_names(self):
+        self.ed.ensure_parsed()
+        return [(n.depth, n.name) for n in self.ed._model.iter_nodes()]
+
+    def test_paste_lines_become_siblings_on_same_level(self):
+        self.ed.set_document_text(self.PASTE_SRC)
+        self.goto(4)
+        self.ed.moveCursor(QTextCursor.MoveOperation.EndOfBlock)
+        self.paste("One\r\nTwo\r\n\r\nThree\r\n")              # Word style, blank line
+        self.assertEqual(self.lines(), ["r/", "├── a/", "│   ├── a1", "│   └── a2",
+                                        "├── emptyOne", "├── Two", "├── Three",
+                                        "└── z/", "    └── z1"])
+        line, col = self.ed.textCursor().blockNumber(), self.ed.textCursor().positionInBlock()
+        self.assertEqual((line, col), (6, len("├── Three")))
+
+    def test_paste_into_empty_new_branch_inside_a_branch(self):
+        self.ed.set_document_text(self.PASTE_SRC)
+        self.goto(2)
+        self.ed.moveCursor(QTextCursor.MoveOperation.EndOfBlock)
+        self.key(K.Key_Return)                                     # new empty item after a1
+        self.paste("Line 1\nLine 2\nLine 3")
+        self.assertEqual(self.tree_names(), [
+            (0, "r/"), (1, "a/"), (2, "a1"), (2, "Line 1"), (2, "Line 2"), (2, "Line 3"),
+            (2, "a2"), (1, "empty"), (1, "z/"), (2, "z1")])
+        self.assertEqual(self.lines()[3:7], ["│   ├── Line 1", "│   ├── Line 2",
+                                             "│   ├── Line 3", "│   └── a2"])
+
+    def test_paste_in_middle_of_name_and_undo(self):
+        self.ed.set_document_text(self.PASTE_SRC)
+        self.cursor_at(4, "empty", 2)                              # em|pty
+        self.paste("X\nY")
+        self.assertEqual(self.tree_names()[4:7], [(1, "emX"), (1, "Ypty"), (1, "z/")])
+        self.assertEqual(self.ed.textCursor().positionInBlock(), len("├── Y"))
+        self.key(K.Key_Z, M.ControlModifier)
+        self.assertEqual(self.ed.toPlainText(), self.PASTE_SRC)
+
+    def test_paste_replaces_selection_one_undo_step(self):
+        self.ed.set_document_text(self.PASTE_SRC)
+        self.select(4, "empty")
+        self.paste("P\nQ")
+        self.assertEqual(self.tree_names()[4:6], [(1, "P"), (1, "Q")])
+        self.key(K.Key_Z, M.ControlModifier)
+        self.assertEqual(self.ed.toPlainText(), self.PASTE_SRC)
+
+    def test_paste_after_branch_with_children_keeps_its_children(self):
+        self.ed.set_document_text(self.PASTE_SRC)
+        self.cursor_at(1, "a/", 2)                                 # end of "a/"
+        self.paste("b\nc")
+        self.assertEqual(self.tree_names()[:6], [
+            (0, "r/"), (1, "a/b"), (2, "a1"), (2, "a2"), (1, "c"), (1, "empty")])
+
+    def test_paste_into_explanation_adds_explanation_lines(self):
+        self.cursor_at(2, "Source code", 11)                       # end of explanation
+        self.paste(" more\nsecond pasted\nthird pasted")
+        src = self.ed._map.node_at(2)
+        self.assertEqual(src.comment, ["Source code more", "second pasted", "third pasted"])
+        self.assertEqual(src.name, "src/")
+        cols = [l.index(MK) for l in self.lines()[2:5]]
+        self.assertEqual(len(set(cols)), 1)                        # aligned under each other
+        self.assertEqual(self.lines()[5].strip()[:12], "│   ├── main")  # tree below intact
+
+    def test_paste_on_empty_spacer_line(self):
+        self.goto(1)                                               # "│" above src/
+        self.paste("new1\nnew2")
+        self.assertEqual([n for _d, n in self.tree_names()][:4], ["project/", "new1", "new2", "src/"])
+        self.assertEqual(self.lines()[1:3], ["├── new1", "├── new2"])
+
+    def test_paste_single_line_and_copied_tree_unchanged(self):
+        self.ed.set_document_text(self.PASTE_SRC)
+        self.cursor_at(4, "empty", 5)
+        self.paste("solo\n")                                      # Word adds a line break
+        self.assertEqual(self.lines()[4], "├── emptysolo")
+        self.assertEqual(len(self.lines()), 7)
+        self.paste("plain")                                        # normal paste unchanged
+        self.assertEqual(self.lines()[4], "├── emptysoloplain")
+        self.ed.set_document_text("r/\n└── a")
+        self.ed.moveCursor(QTextCursor.MoveOperation.End)
+        self.paste("\n├── b\n└── c")                              # a piece of tree: as it is
+        self.assertEqual(self.ed.toPlainText(), "r/\n└── a\n├── b\n└── c")
+
+    def test_paste_lines_with_arrow_get_explanations_and_marks_kept(self):
+        self.ed.set_document_text(self.PASTE_SRC)
+        self.mark(6, K.Key_G)                                      # z1 green
+        self.mark(4, K.Key_R)                                      # empty red
+        self.cursor_at(4, "empty", 5)
+        self.paste("\nfoo   " + MK + " the foo")
+        self.ed.ensure_parsed()
+        node = [n for n in self.ed._model.iter_nodes() if n.name == "foo"][0]
+        self.assertEqual(self.lines()[4], "├── empty")                # nothing merged
+        self.assertEqual(node.comment, ["the foo"])
+        z1 = [i for i, l in enumerate(self.lines()) if "z1" in l][0]
+        self.assertEqual(set(self.colors_of(z1, "z1")), {self.c("mark_checked")})
+        self.assertEqual(set(self.colors_of(4, "empty")), {self.c("mark_problem")})
+
+    def test_paste_keeps_space_before_first_word(self):
+        self.ed.set_document_text(self.PASTE_SRC)
+        self.cursor_at(4, "empty", 5)
+        self.paste(" next word\nnew")
+        self.assertEqual(self.tree_names()[4:6], [(1, "empty next word"), (1, "new")])
+
+    def test_paste_only_blank_lines_does_nothing(self):
+        before = self.ed.toPlainText()
+        self.goto(2)
+        self.paste("\n\n  \n")
+        self.assertEqual(self.ed.toPlainText(), before)
+
+    # column selection -------------------------------------------------------------
+    COL_SRC = "r/\n├── alpha    " + MK + " one\n├── beta     " + MK + " two\n└── gamma    " + MK + " three"
+    S = M.ShiftModifier if M is not None else None
+
+    def col_setup(self, line=1, col=4):
+        self.ed.set_document_text(self.COL_SRC)
+        b = self.ed.document().findBlockByNumber(line)
+        cur = QTextCursor(b)
+        cur.setPosition(b.position() + col)
+        self.ed.setTextCursor(cur)
+        self.key(K.Key_Insert, M.AltModifier | M.ShiftModifier)    # column mode on
+
+    def test_column_toggle_shortcut_button_and_status(self):
+        self.col_setup()
+        self.assertTrue(self.ed.column_mode())
+        self.assertTrue(self.win.a_column.isChecked())
+        self.assertFalse(self.win.column_label.isHidden())
+        labels = {b._label: b for b in self.win.findChildren(app_module.ActionButton)}
+        self.assertIn("Column select", labels)
+        self.assertEqual(labels["Column select"]._keys(), "Alt+Shift+Ins")
+        self.key(K.Key_Insert, M.AltModifier | M.ShiftModifier)
+        self.assertFalse(self.ed.column_mode())
+        self.assertFalse(self.win.a_column.isChecked())
+        self.assertTrue(self.win.column_label.isHidden())
+        self.win.a_column.trigger()                                # via the button
+        self.assertTrue(self.ed.column_mode())
+
+    def test_column_select_and_type_on_all_rows(self):
+        self.col_setup()
+        self.key(K.Key_Down, self.S)
+        self.key(K.Key_Down, self.S)
+        self.assertEqual(self.ed.block_rect(), (1, 3, 4, 4))
+        QTest.keyClicks(self.ed, "x_")
+        self.assertEqual(self.lines()[1:4], ["├── x_alpha    " + MK + " one",
+                                             "├── x_beta     " + MK + " two",
+                                             "└── x_gamma    " + MK + " three"])
+        self.key(K.Key_Z, M.ControlModifier)                       # one undo per key
+        self.key(K.Key_Z, M.ControlModifier)
+        self.assertEqual(self.ed.toPlainText(), self.COL_SRC)
+
+    def test_column_replace_rectangle_and_backspace_delete(self):
+        self.col_setup()
+        self.key(K.Key_Down, self.S)
+        for _ in range(4):
+            self.key(K.Key_Right, self.S)                          # "alph" / "beta"
+        self.assertEqual(self.ed.block_rect(), (1, 2, 4, 8))
+        QTest.keyClicks(self.ed, "Z")
+        self.assertEqual(self.lines()[1][:9], "├── Za   ")
+        self.assertEqual(self.lines()[2][:9], "├── Z    ")
+        self.key(K.Key_Backspace)                                  # removes the Z on both
+        self.assertEqual(self.lines()[1][:8], "├── a   ")
+        self.key(K.Key_Delete)                                     # removes "a" / " "
+        self.assertEqual(self.lines()[1][:5], "├──  ")
+        self.assertEqual(self.lines()[3], "└── gamma    " + MK + " three")   # untouched
+
+    def test_column_tab_and_shift_tab(self):
+        self.col_setup(col=13)                                     # just before the arrows
+        self.key(K.Key_Down, self.S)
+        self.key(K.Key_Down, self.S)
+        self.key(K.Key_Tab)
+        self.assertEqual([l.index(MK) for l in self.lines()[1:4]], [17, 17, 17])
+        self.key(K.Key_Backtab, self.S)
+        self.key(K.Key_Backtab, self.S)
+        self.assertEqual([l.index(MK) for l in self.lines()[1:4]], [9, 9, 9])
+        self.assertEqual(self.lines()[2], "├── beta " + MK + " two")   # only spaces removed
+        self.assertTrue(self.lines()[1].startswith("├── alpha"))
+
+    def test_column_copy_cut_paste(self):
+        self.col_setup()
+        self.key(K.Key_Down, self.S)
+        self.key(K.Key_Down, self.S)
+        for _ in range(4):
+            self.key(K.Key_Right, self.S)
+        self.key(K.Key_C, M.ControlModifier)
+        self.assertEqual(QApplication.clipboard().text(), "alph\nbeta\ngamm")
+        self.key(K.Key_X, M.ControlModifier)
+        self.assertEqual([l[4:6] for l in self.lines()[1:4]], ["a ", "  ", "a "])
+        self.key(K.Key_V, M.ControlModifier)                       # paste back row by row
+        self.assertEqual(self.ed.toPlainText(), self.COL_SRC)
+        self.ed.set_document_text(self.COL_SRC)                    # one line on every row
+        self.col_setup()
+        self.key(K.Key_Down, self.S)
+        self.key(K.Key_Down, self.S)
+        QApplication.clipboard().setText("- ")
+        self.key(K.Key_V, M.ControlModifier)
+        self.assertTrue(all(l[4:6] == "- " for l in self.lines()[1:4]))
+
+    def test_column_virtual_space_beyond_line_end(self):
+        self.ed.set_document_text("r/\n├── a\n├── bbbbbbbb\n└── c")
+        self.goto(1)
+        self.ed.moveCursor(QTextCursor.MoveOperation.EndOfBlock)
+        self.key(K.Key_Insert, M.AltModifier | M.ShiftModifier)
+        for _ in range(6):
+            self.key(K.Key_Right, self.S)                          # past the end of "a"
+        self.key(K.Key_Right)                                      # collapse to the right edge
+        self.assertEqual(self.ed.block_rect(), (1, 1, 11, 11))
+        self.key(K.Key_Down, self.S)
+        self.key(K.Key_Down, self.S)
+        QTest.keyClicks(self.ed, "|")
+        self.assertEqual(self.lines()[1:4], ["├── a      |", "├── bbbbbbb|b", "└── c      |"])
+
+    def test_column_mouse_drag(self):
+        self.ed.set_document_text(self.COL_SRC)
+        self.key(K.Key_Insert, M.AltModifier | M.ShiftModifier)
+        vp = self.ed.viewport()
+
+        def pt(line, col):
+            b = self.ed.document().findBlockByNumber(line)
+            geo = self.ed.blockBoundingGeometry(b).translated(self.ed.contentOffset())
+            x = self.ed._col_x(b, geo, col) + 1
+            return QPoint(int(x), int(geo.center().y()))
+        QTest.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pt(1, 4))
+        QTest.mouseMove(vp, pt(3, 6))
+        ev = QMouseEvent(QEvent.Type.MouseMove, QPointF(pt(3, 6)), QPointF(vp.mapToGlobal(pt(3, 6))),
+                         Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(vp, ev)
+        QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pt(3, 6))
+        self.assertEqual(self.ed.block_rect(), (1, 3, 4, 6))
+        self.key(K.Key_C, M.ControlModifier)
+        self.assertEqual(QApplication.clipboard().text(), "al\nbe\nga")
+
+    def test_column_selection_converted_from_normal_selection(self):
+        self.ed.set_document_text(self.COL_SRC)
+        self.select(1, "alpha", "be", end_line=2)
+        self.key(K.Key_Insert, M.AltModifier | M.ShiftModifier)
+        self.assertEqual(self.ed.block_rect(), (1, 2, 4, 6))
+
+    def test_column_ends_on_other_edits_escape_and_folds(self):
+        self.col_setup()
+        self.key(K.Key_Down, self.S)
+        self.key(K.Key_Escape)
+        self.assertIsNone(self.ed.block_rect())
+        self.assertTrue(self.ed.column_mode())                     # mode stays on
+        self.key(K.Key_Down, self.S)                               # new block from cursor
+        self.assertIsNotNone(self.ed.block_rect())
+        self.key(K.Key_Q, M.ControlModifier)                       # structural edit
+        self.assertIsNone(self.ed.block_rect())
+        # folded lines are skipped
+        self.ed.set_document_text("r/\n├── a/\n│   └── hidden\n└── b")
+        self.ed.toggle_fold(1)
+        self.goto(1)
+        self.ed.set_column_mode(False)
+        self.ed.set_column_mode(True)
+        self.key(K.Key_Down, self.S)
+        QTest.keyClicks(self.ed, "#")
+        self.assertIn("hidden", self.ed.toPlainText().split("\n")[2])
+        self.assertTrue(self.lines()[2].endswith("hidden"))
+
+    def test_column_mode_off_normal_editing_unchanged(self):
+        self.col_setup()
+        self.key(K.Key_Insert, M.AltModifier | M.ShiftModifier)    # off again
+        self.key(K.Key_Down, self.S)
+        self.assertIsNone(self.ed.block_rect())
+        self.assertTrue(self.ed.textCursor().hasSelection())       # normal row selection
+
+    def test_column_altgr_characters(self):
+        self.col_setup()
+        self.key(K.Key_Down, self.S)
+        ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_2,
+                       M.ControlModifier | M.AltModifier, "@")      # AltGr+2 on Swiss keyboards
+        QApplication.sendEvent(self.ed, ev)
+        self.assertTrue(self.lines()[1].startswith("├── @alpha"))
+        self.assertTrue(self.lines()[2].startswith("├── @beta"))
+
+    # colour legend ------------------------------------------------------------------
+    CYAN = "#0891b2"
+
+    def patch_dialog(self, label=None, color=None, accept=True):
+        """Answer the colour dialog automatically (like a person would)."""
+        orig = app_module.ColourDialog.exec
+        test = self
+
+        def fake(d):
+            test.last_dialog = d
+            if label is not None:
+                d.meaning.setText(label)
+            if color is not None:
+                d.set_colour(color)
+            if not accept:
+                return QDialog.DialogCode.Rejected
+            test.last_error = d.validate()
+            return QDialog.DialogCode.Rejected if test.last_error else QDialog.DialogCode.Accepted
+        app_module.ColourDialog.exec = fake
+        self.addCleanup(setattr, app_module.ColourDialog, "exec", orig)
+
+    def add_custom(self, label="Same on both robots", color=None):
+        self.patch_dialog(label, color or self.CYAN)
+        self.win.add_colour()
+        return self.ed.colours.customs()[-1]
+
+    def chip_info(self):
+        return [(c.legend_key, c.text(), c.legend_color) for c in self.win.legend.chips]
+
+    def test_legend_shows_every_meaning(self):
+        t = self.ed.theme
+        self.assertFalse(self.win.legend.isHidden())
+        self.assertEqual(self.chip_info(), [
+            ("text", "Not checked yet (only mentioned)", QColor(t.fg).name()),
+            ("checked", "Accepted", QColor(t.mark_checked).name()),
+            ("explore", "To be approved", QColor(t.mark_explore).name()),
+            ("problem", "Rejected", QColor(t.mark_problem).name()),
+            ("explanation", "Explanation", QColor(t.comment).name())])
+        self.assertEqual(self.win.a_mark_checked.text(), "Colour line: Accepted")
+        self.assertEqual(self.win.a_word_problem.text(), "Colour word / selection: Rejected")
+
+    def test_legend_follows_theme(self):
+        for dark in (True, False):
+            self.win._set_dark(dark)
+            t = self.ed.theme
+            self.assertEqual(self.win.legend.chip("checked").legend_color,
+                             QColor(t.mark_checked).name())
+            self.assertEqual(self.win.legend.chip("explanation").legend_color,
+                             QColor(t.comment).name())
+            self.assertTrue(self.ed._rev_ok())                     # fold arrows stay
+
+    def test_add_custom_colour_legend_menus_and_shortcuts(self):
+        e = self.add_custom()
+        self.assertEqual((e.label, e.color, e.line_key, e.word_key),
+                         ("Same on both robots", self.CYAN, "Alt+5", "Alt+Shift+5"))
+        self.assertIn((e.key, "Same on both robots", self.CYAN), self.chip_info())
+        keys = [c.legend_key for c in self.win.legend.chips]
+        self.assertEqual(keys[-2:], [e.key, "explanation"])
+        self.assertEqual([app_module.shortcut_text(a) for a in self.win.mark_actions],
+                         ["Alt+G", "Alt+O", "Alt+R", "Alt+5", "Alt+C"])
+        self.assertEqual([app_module.shortcut_text(a) for a in self.win.word_actions],
+                         ["Alt+Shift+G", "Alt+Shift+O", "Alt+Shift+R", "Alt+Shift+5",
+                          "Alt+Shift+C"])
+        self.assertEqual(self.win.mark_menu.actions(), self.win.mark_actions)
+        self.assertIn(self.win.custom_line_actions[e.key], self.win.tree_menu.actions())
+        self.assertIn("Alt+5", self.win.a_mark_menu.toolTip())
+        # Alt+5: whole name, again = remove
+        self.mark(2, K.Key_5)
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.CYAN})
+        self.assertEqual(set(self.colors_of(2, "Source code")), {self.c("comment")})
+        self.assertIn("Same on both robots", self.win.statusBar().currentMessage())
+        self.mark(2, K.Key_5)
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.c("folder")})
+        # Alt+Shift+5: only the word
+        self.select(4, "really")
+        self.key(K.Key_5, M.AltModifier | M.ShiftModifier)
+        self.assertEqual(set(self.colors_of(4, "really")), {self.CYAN})
+        self.assertEqual(set(self.colors_of(4, "a_")), {self.c("file")})
+        # Alt+C / Alt+Shift+C still give the default colour back
+        self.mark(7, K.Key_5)
+        self.mark(7, K.Key_C)
+        self.assertEqual(set(self.colors_of(7, "README.md")), {self.c("file")})
+        self.key(K.Key_C, M.AltModifier | M.ShiftModifier)
+
+    def test_custom_colour_never_on_explanations(self):
+        self.add_custom()
+        self.select(2, "Source code")
+        self.key(K.Key_5, M.AltModifier | M.ShiftModifier)
+        self.assertEqual(set(self.colors_of(2, "Source code")), {self.c("comment")})
+
+    def test_custom_colour_saved_with_tree_and_reloaded(self):
+        e = self.add_custom()
+        self.mark(2, K.Key_5)
+        self.select(4, "module")
+        self.key(K.Key_5, M.AltModifier | M.ShiftModifier)
+        with open(self.path + ".marks.json", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["version"], 2)
+        self.assertIn({"key": e.key, "label": "Same on both robots", "color": self.CYAN,
+                       "line_key": "Alt+5", "word_key": "Alt+Shift+5"}, data["legend"]["colours"])
+        self.assertEqual([m["mark"] for m in data["marks"]], [e.key])
+        self.assertEqual([w["mark"] for w in data["words"]], [e.key])
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), SAMPLE + "\n")               # .txt stays pure
+        self.win.close()
+        win2 = app_module.MainWindow(self.path)
+        old = self.ed
+        try:
+            self.ed = win2.editor
+            self.assertIn((e.key, "Same on both robots", self.CYAN),
+                          [(c.legend_key, c.text(), c.legend_color) for c in win2.legend.chips])
+            self.assertEqual(set(self.colors_of(2, "src/")), {self.CYAN})
+            self.assertEqual(set(self.colors_of(4, "module")), {self.CYAN})
+            self.assertEqual(app_module.shortcut_text(win2.custom_line_actions[e.key]), "Alt+5")
+        finally:
+            self.ed = old
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_new_tree_gets_default_legend_not_document_legend(self):
+        self.add_custom()                                  # only in this tree
+        self.win.new_file(ask=False)
+        self.assertEqual(self.ed.colours.customs(), [])
+        self.assertEqual(len(self.win.legend.chips), 5)
+
+    def test_remove_custom_colour_in_use(self):
+        e = self.add_custom()
+        self.mark(2, K.Key_5)
+        self.select(4, "module")
+        self.key(K.Key_5, M.AltModifier | M.ShiftModifier)
+        self.assertEqual(self.ed.mark_uses(e.mark), 2)
+        orig = app_module.QMessageBox.question
+        self.addCleanup(setattr, app_module.QMessageBox, "question", orig)
+        app_module.QMessageBox.question = staticmethod(
+            lambda *a, **k: app_module.QMessageBox.StandardButton.Cancel)
+        self.win.remove_colour(e.key)                     # cancelled: nothing changes
+        self.assertIsNotNone(self.ed.colours.by_key(e.key))
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.CYAN})
+        app_module.QMessageBox.question = staticmethod(
+            lambda *a, **k: app_module.QMessageBox.StandardButton.Yes)
+        self.win.remove_colour(e.key)
+        self.assertIsNone(self.ed.colours.by_key(e.key))
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.c("folder")})
+        self.assertEqual(set(self.colors_of(4, "module")), {self.c("file")})
+        self.assertNotIn(e.key, [c.legend_key for c in self.win.legend.chips])
+        self.assertEqual(self.win.custom_line_actions, {})
+        self.assertEqual([app_module.shortcut_text(a) for a in self.win.mark_actions],
+                         ["Alt+G", "Alt+O", "Alt+R", "Alt+C"])
+        self.mark(3, K.Key_5)                               # shortcut does nothing now
+        self.assertEqual(set(self.colors_of(3, "main.py")), {self.c("file")})
+        self.assertFalse(os.path.exists(self.path + ".marks.json"))   # back to default
+
+    def test_remove_unused_custom_without_question(self):
+        e = self.add_custom()
+        orig = app_module.QMessageBox.question
+        self.addCleanup(setattr, app_module.QMessageBox, "question", orig)
+
+        def fail(*a, **k):
+            raise AssertionError("no question expected")
+        app_module.QMessageBox.question = staticmethod(fail)
+        self.win.remove_colour(e.key)
+        self.assertEqual(self.ed.colours.customs(), [])
+
+    def test_builtin_colours_cannot_be_removed(self):
+        self.win.remove_colour("checked")
+        self.assertIsNotNone(self.ed.colours.by_key("checked"))
+        self.assertIn("can't be removed", self.win.statusBar().currentMessage())
+        menu = self.win.legend.chip("checked").menu()
+        rm = [a for a in menu.actions() if a.text() == "Remove colour"][0]
+        self.assertFalse(rm.isEnabled())
+        self.assertIn(self.win.a_mark_checked, menu.actions())
+        self.assertIn(self.win.a_word_checked, menu.actions())
+
+    def test_legend_chip_menu_applies_colour(self):
+        e = self.add_custom()
+        self.goto(7)
+        menu = self.win.legend.chip(e.key).menu()
+        menu.actions()[0].trigger()                        # "Colour line: …"
+        self.assertEqual(set(self.colors_of(7, "README.md")), {self.CYAN})
+        self.cursor_at(3, "main.py", 2)
+        self.win.legend.chip("explore").menu().actions()[1].trigger()   # word
+        self.assertEqual(set(self.colors_of(3, "main.py")), {self.c("mark_explore")})
+        text_menu = self.win.legend.chip("text").menu()
+        self.assertIn(self.win.a_mark_clear, text_menu.actions())
+        self.goto(7)
+        self.win.a_mark_clear.trigger()
+        self.assertEqual(set(self.colors_of(7, "README.md")), {self.c("file")})
+
+    def test_edit_custom_colour_label_and_colour(self):
+        e = self.add_custom()
+        self.mark(2, K.Key_5)
+        self.patch_dialog("Shared hardware", "#ec4899")
+        self.win.edit_colour(e.key)
+        self.assertEqual((e.label, e.color), ("Shared hardware", "#ec4899"))
+        self.assertEqual(set(self.colors_of(2, "src/")), {"#ec4899"})
+        self.assertIn((e.key, "Shared hardware", "#ec4899"), self.chip_info())
+        self.assertEqual(self.win.custom_line_actions[e.key].text(), "Colour line: Shared hardware")
+        self.patch_dialog("Should not be used", "#111111", accept=False)    # Cancel
+        self.win.edit_colour(e.key)
+        self.assertEqual(e.label, "Shared hardware")
+
+    def test_edit_builtin_and_fixed_meanings(self):
+        self.patch_dialog("Approved by me")
+        self.win.edit_colour("checked")
+        self.assertTrue(self.last_dialog.color_btn.isEnabled())      # colour can be changed
+        self.assertFalse(self.last_dialog.standard_btn.isHidden())   # ... and reset
+        self.assertEqual(self.win.legend.chip("checked").text(), "Approved by me")
+        self.assertEqual(self.win.a_mark_checked.text(), "Colour line: Approved by me")
+        self.mark(2, K.Key_G)
+        self.assertIn("Approved by me", self.win.statusBar().currentMessage())
+        self.patch_dialog("Only mentioned")
+        self.win.edit_colour("text")
+        self.patch_dialog("Notes")
+        self.win.edit_colour("explanation")
+        self.assertEqual(self.win.legend.chip("text").text(), "Only mentioned")
+        self.assertEqual(self.win.legend.chip("explanation").text(), "Notes")
+        self.assertEqual(self.win.legend.chip("explanation").legend_color,
+                         QColor(self.ed.theme.comment).name())
+
+    def test_colour_dialog_validation(self):
+        self.add_custom()
+        t = self.ed.theme
+        cases = [("", self.CYAN, "describe"),
+                 ("accepted", "#123456", "already in the legend"),             # case-insensitive
+                 ("same ON both robots", "#123456", "already in the legend"),
+                 ("New one", t.comment, "already used"),                       # explanation colour
+                 ("New one", t.mark_checked, "already used"),
+                 ("New one", self.CYAN, "already used"),
+                 ("New one", t.folder, "already used")]
+        for label, color, expected in cases:
+            self.patch_dialog(label, color)
+            self.win.add_colour()
+            self.assertIn(expected, self.last_error or "", (label, color))
+        self.assertEqual(len(self.ed.colours.customs()), 1)
+        self.patch_dialog("New one", "#123456")
+        self.win.add_colour()
+        self.assertIsNone(self.last_error)
+        self.assertEqual(len(self.ed.colours.customs()), 2)
+
+    def test_suggested_shortcuts_and_more_than_five_colours(self):
+        added = [self.add_custom(f"Colour {i}", c) for i, c in
+                 enumerate(["#111111", "#222222", "#333333", "#444444", "#555555", "#666666"])]
+        self.assertEqual([e.line_key for e in added],
+                         ["Alt+5", "Alt+6", "Alt+7", "Alt+8", "Alt+9", ""])
+        self.assertEqual([e.word_key for e in added][-2:], ["Alt+Shift+9", ""])
+        sixth = added[-1]
+        self.assertEqual(self.win.custom_line_actions[sixth.key].shortcuts(), [])
+        self.assertEqual(self.win.colour_shortcut_text(sixth), "")
+        self.goto(7)
+        self.win.custom_line_actions[sixth.key].trigger()          # via the menu / legend
+        self.assertEqual(set(self.colors_of(7, "README.md")), {"#666666"})
+        self.mark(3, K.Key_9)
+        self.assertEqual(set(self.colors_of(3, "main.py")), {"#555555"})
+        self.win.remove_colour(added[0].key)                       # unused: frees Alt+5
+        new = self.add_custom("Colour new", "#777777")
+        self.assertEqual(new.line_key, "Alt+5")
+
+    def test_save_as_default_used_for_every_new_tree(self):
+        e = self.add_custom()
+        self.patch_dialog("Approved")
+        self.win.edit_colour("checked")
+        self.assertTrue(self.win.save_default_colours())
+        with open(self.colours_file, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["kind"], "colour-legend")
+        self.assertIn({"key": e.key, "label": "Same on both robots", "color": self.CYAN,
+                       "line_key": "Alt+5", "word_key": "Alt+Shift+5"}, data["colours"])
+        self.win.new_file(ask=False)                                # same window
+        self.assertEqual([x.key for x in self.ed.colours.customs()], [e.key])
+        self.assertEqual(self.ed.colours.by_key("checked").label, "Approved")
+        self.ed.colours.customs()[0].label = "changed"            # a copy, not the default
+        self.assertEqual(self.win.default_palette.customs()[0].label, "Same on both robots")
+        win2 = app_module.MainWindow(None)                          # new start of the app
+        try:
+            self.assertEqual([(x.key, x.label, x.color) for x in win2.editor.colours.customs()],
+                             [(e.key, "Same on both robots", self.CYAN)])
+            self.assertEqual(win2.legend.chip("checked").text(), "Approved")
+            self.assertEqual(app_module.shortcut_text(win2.custom_line_actions[e.key]), "Alt+5")
+        finally:
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_tree_with_default_legend_needs_no_marks_file(self):
+        self.add_custom()
+        self.assertTrue(os.path.exists(self.path + ".marks.json"))  # legend differs
+        self.win.save_default_colours()
+        self.assertFalse(os.path.exists(self.path + ".marks.json"))  # now equals default
+        self.mark(2, K.Key_5)
+        with open(self.path + ".marks.json", encoding="utf-8") as f:
+            self.assertIn("legend", json.load(f))
+
+    def test_load_default_merges_into_tree(self):
+        a = self.add_custom("From default", "#111111")
+        self.win.save_default_colours()
+        self.win._ask_remove_default = lambda e, uses: "here"      # keep it in the default
+        self.win.remove_colour(a.key)
+        b = self.add_custom("Only here", "#222222")
+        self.mark(2, K.Key_5)                                       # b now has slot 5
+        self.win.load_default_colours()
+        keys = [x.key for x in self.ed.colours.customs()]
+        self.assertEqual(keys, [b.key, a.key])
+        self.assertEqual(set(self.colors_of(2, "src/")), {"#222222"})  # marks kept
+        self.assertNotEqual(self.ed.colours.by_key(a.key).line_key, "Alt+5")   # no clash
+        self.assertIn("1 colour(s) added", self.win.statusBar().currentMessage())
+
+    def test_broken_default_file_falls_back(self):
+        with open(self.colours_file, "w", encoding="utf-8") as f:
+            f.write("{ broken")
+        win2 = app_module.MainWindow(None)
+        try:
+            self.assertEqual(win2.editor.colours.customs(), [])
+            self.assertEqual(len(win2.legend.chips), 5)
+            self.assertIn("could not be read", win2.statusBar().currentMessage())
+        finally:
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_palette_file_validation(self):
+        P = app_module.Palette
+        p = P.from_json({"text": "  Mentioned   only ", "text_color": "#ABCDEF",
+                         "explanation_color": "nope", "colours": [
+            {"key": "checked", "label": "OK", "color": "#00AA00", "line_key": "Alt+J"},
+            {"key": "c-0000000a", "label": "Good", "color": "#ABCDE1", "slot": 6},   # old file
+            {"key": "c-0000000a", "label": "Duplicate key", "color": "#123456"},
+            {"key": "c-0000000b", "label": "Bad colour", "color": "red"},
+            {"key": "bad key", "label": "x", "color": "#123456"},
+            {"key": "c-0000000c", "label": "", "color": "#123456"},
+            {"key": "c-0000000d", "label": "x" * 200, "color": "#123457", "slot": 6},
+            {"key": "c-0000000e", "label": "Same keys", "color": "#123458",
+             "line_key": "Alt+J", "word_key": "Alt+Shift+O"},
+            {"key": "c-0000000f", "label": "Bad keys", "color": "#123459",
+             "line_key": "Alt+1, Alt+2", "word_key": 42},
+            "not a dict"]})
+        self.assertEqual((p.text_label, p.text_color, p.explanation_color),
+                         ("Mentioned only", "#abcdef", None))
+        b = p.by_key("checked")
+        self.assertEqual((b.label, b.color, b.line_key, b.word_key),
+                         ("OK", "#00aa00", "Alt+J", "Alt+Shift+G"))
+        self.assertEqual([e.key for e in p.entries], ["checked", "explore", "problem",
+                                                      "c-0000000a", "c-0000000d",
+                                                      "c-0000000e", "c-0000000f"])
+        self.assertEqual(p.by_key("c-0000000a").line_key, "Alt+6")      # from "slot"
+        self.assertEqual(p.by_key("c-0000000d").line_key, "")           # Alt+6 already taken
+        self.assertEqual(p.by_key("c-0000000e").line_key, "")           # Alt+J already taken
+        self.assertEqual(p.by_key("c-0000000e").word_key, "")           # Alt+Shift+O taken
+        self.assertEqual((p.by_key("c-0000000f").line_key, p.by_key("c-0000000f").word_key),
+                         ("", ""))
+        self.assertEqual(len(p.by_key("c-0000000d").label), app_module.LABEL_MAX)
+        self.assertEqual(len({e.mark for e in p.entries}), 7)
+        self.assertTrue(P.from_json(p.to_json()).same_as(p))
+        with self.assertRaises(ValueError):
+            P.from_json([1, 2])
+        with self.assertRaises(ValueError):
+            P().remove("checked")
+        self.assertEqual(app_module.compact_keys(["Alt+G", "Alt+O", "Alt+R", "Alt+C"]),
+                         "Alt+G/O/R/C")
+        self.assertEqual(app_module.compact_keys(["Alt+Shift+G", "", "Alt+Shift+C"]),
+                         "Alt+Shift+G/C")
+        self.assertEqual(app_module.compact_keys(["", ""]), "no shortcuts")
+
+    def test_old_marks_file_without_legend_still_loads(self):
+        self.win.close()
+        data = {"app": "Nodeon", "version": 1, "marks": [
+            {"path": [["project/", 0], ["src/", 0]], "mark": "checked"},
+            {"path": [["project/", 0], ["docs/", 0]], "mark": "c-deadbeef"}], "words": []}
+        with open(self.path + ".marks.json", "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        win2 = app_module.MainWindow(self.path)
+        old = self.ed
+        try:
+            self.ed = win2.editor
+            self.assertEqual(set(self.colors_of(2, "src/")), {self.c("mark_checked")})
+            self.assertEqual(set(self.colors_of(5, "docs/")), {self.c("folder")})  # unknown key
+            self.assertEqual(len(win2.legend.chips), 5)
+        finally:
+            self.ed = old
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_custom_mark_follows_branch_moves_and_undo(self):
+        self.add_custom()
+        self.mark(7, K.Key_5)
+        self.goto(7)
+        self.key(K.Key_Up, M.AltModifier | M.ShiftModifier)
+        line = [i for i, l in enumerate(self.lines()) if "README" in l][0]
+        self.assertEqual(set(self.colors_of(line, "README.md")), {self.CYAN})
+        self.key(K.Key_Z, M.ControlModifier)
+        QTest.qWait(300)
+        self.assertEqual(set(self.colors_of(7, "README.md")), {self.CYAN})
+
+    # removing own colours ---------------------------------------------------------
+    def test_remove_via_legend_menu_like_a_person(self):
+        e = self.add_custom()
+        menu = self.win.legend.chip(e.key).menu()
+        [a for a in menu.actions() if a.text() == "Remove colour"][0].trigger()
+        QTest.qWait(10)
+        self.assertIsNone(self.ed.colours.by_key(e.key))
+        self.assertIsNone(self.win.legend.chip(e.key))
+
+    def test_remove_from_colour_dialog_button(self):
+        e = self.add_custom()
+        orig = app_module.ColourDialog.exec
+        self.addCleanup(setattr, app_module.ColourDialog, "exec", orig)
+        app_module.ColourDialog.exec = lambda d: app_module.ColourDialog.REMOVE
+        self.win.edit_colour(e.key)
+        self.assertIsNone(self.ed.colours.by_key(e.key))
+
+    def test_remove_saved_default_colour_everywhere(self):
+        e = self.add_custom()
+        self.mark(2, K.Key_5)
+        self.win.save_default_colours()
+        asked = []
+        self.win._ask_remove_default = lambda entry, uses: (asked.append(uses), "cancel")[1]
+        self.assertFalse(self.win.remove_colour(e.key))             # cancel: nothing changes
+        self.assertEqual(asked, [1])
+        self.assertIsNotNone(self.ed.colours.by_key(e.key))
+        self.win._ask_remove_default = lambda entry, uses: "everywhere"
+        self.assertTrue(self.win.remove_colour(e.key))
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.c("folder")})
+        with open(self.colours_file, encoding="utf-8") as f:
+            self.assertNotIn(e.key, f.read())                         # gone from the file
+        self.win.new_file(ask=False)
+        self.assertEqual(self.ed.colours.customs(), [])               # new tree: gone
+        win2 = app_module.MainWindow(None)                            # new start: gone
+        try:
+            self.assertEqual(win2.editor.colours.customs(), [])
+        finally:
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_remove_saved_default_colour_only_here(self):
+        e = self.add_custom()
+        self.win.save_default_colours()
+        self.win._ask_remove_default = lambda entry, uses: "here"
+        self.win.remove_colour(e.key)
+        self.assertIsNone(self.ed.colours.by_key(e.key))
+        with open(self.path + ".marks.json", encoding="utf-8") as f:   # this tree remembers
+            self.assertNotIn(e.key, f.read())
+        self.win.new_file(ask=False)
+        self.assertEqual([x.key for x in self.ed.colours.customs()], [e.key])  # still default
+
+    def test_ask_remove_default_real_message_box(self):
+        e = self.add_custom()
+        self.win.save_default_colours()
+        guard = app_module.QMessageBox.exec                       # restore the guard after
+        self.addCleanup(setattr, app_module.QMessageBox, "exec", guard)
+        app_module.QMessageBox.exec = type(self)._orig_box_exec   # a real, clickable box
+
+        def answer(text):
+            for box in QApplication.topLevelWidgets():
+                if isinstance(box, app_module.QMessageBox) and box.isVisible():
+                    [b for b in box.buttons() if b.text() == text][0].click()
+        for text, expected in (("Only from this tree", "here"), ("Remove everywhere", "everywhere")):
+            QTimer.singleShot(50, lambda t=text: answer(t))
+            self.assertEqual(self.win._ask_remove_default(e, 0), expected)
+
+    # own shortcuts ------------------------------------------------------------------
+    def keys_dialog(self, line, word, label=None, color=None):
+        """Answer the colour dialog with new shortcuts."""
+        orig = app_module.ColourDialog.exec
+        test = self
+
+        def fake(d):
+            test.last_dialog = d
+            if label is not None:
+                d.meaning.setText(label)
+            if color == "standard":
+                d.reset_colour()
+            elif color is not None:
+                d.set_colour(color)
+            d.set_keys(line, word)
+            test.last_error = d.validate()
+            return QDialog.DialogCode.Rejected if test.last_error else QDialog.DialogCode.Accepted
+        app_module.ColourDialog.exec = fake
+        self.addCleanup(setattr, app_module.ColourDialog, "exec", orig)
+
+    def test_own_shortcuts_for_custom_colour(self):
+        e = self.add_custom()
+        self.keys_dialog("Alt+K", "Alt+Shift+K")
+        self.win.edit_colour(e.key)
+        self.assertIsNone(self.last_error)
+        self.mark(2, K.Key_K)
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.CYAN})
+        self.mark(3, K.Key_5)                                        # old key does nothing
+        self.assertEqual(set(self.colors_of(3, "main.py")), {self.c("file")})
+        self.select(4, "module")
+        self.key(K.Key_K, M.AltModifier | M.ShiftModifier)
+        self.assertEqual(set(self.colors_of(4, "module")), {self.CYAN})
+        self.assertIn("Alt+K", self.win.legend.chip(e.key).toolTip())
+        with open(self.path + ".marks.json", encoding="utf-8") as f:
+            item = [c for c in json.load(f)["legend"]["colours"] if c["key"] == e.key][0]
+        self.assertEqual((item["line_key"], item["word_key"]), ("Alt+K", "Alt+Shift+K"))
+
+    def test_own_shortcuts_for_builtin_colour_and_caption(self):
+        self.keys_dialog("Alt+J", "Alt+Shift+J")
+        self.win.edit_colour("checked")
+        self.mark(2, K.Key_J)
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.c("mark_checked")})
+        self.mark(3, K.Key_G)                                        # Alt+G is free now
+        self.assertEqual(set(self.colors_of(3, "main.py")), {self.c("file")})
+        labels = {b._label: b for b in self.win.findChildren(app_module.ActionButton)}
+        self.assertEqual(labels["Mark line"]._keys(), "Alt+J/O/R/C")
+        self.assertEqual(labels["Mark words"]._keys(), "Alt+Shift+J/O/R/C")
+        self.assertEqual(self.win.a_mark_checked.text(), "Colour line: Accepted")   # prefix stays
+        self.assertIn(("Accepted", "Whole name: Alt+J  ·  Word / selection: Alt+Shift+J"),
+                      self.win._legend_help_rows())
+
+    def test_own_shortcuts_for_default_colour_and_none(self):
+        self.mark(2, K.Key_G)
+        self.keys_dialog("Alt+N", "")                                 # no word shortcut
+        self.win.edit_colour("text")
+        self.mark(2, K.Key_N)
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.c("folder")})
+        self.assertEqual(self.win.a_word_clear.shortcuts(), [])
+        self.assertIn("Default colour", self.win.a_mark_clear.text())
+
+    def test_shortcut_conflicts_are_refused(self):
+        e = self.add_custom()
+        cases = [("Ctrl+Q", "", "Delete line"), ("Ctrl+C", "", "Copy"),
+                 ("Alt+F", "", "File menu"), ("Alt+O", "", "To be approved"),
+                 ("Alt+K", "Alt+K", "different shortcuts"), ("K", "", "typed as text"),
+                 ("Shift+K", "", "typed as text"), ("Alt+1", "", "Collapse all")]
+        for line, word, expected in cases:
+            self.keys_dialog(line, word)
+            self.win.edit_colour(e.key)
+            self.assertIn(expected, self.last_error or "", (line, word))
+        self.assertEqual(e.line_key, "Alt+5")                         # unchanged
+        self.keys_dialog("F7", "Ctrl+Shift+F7")                       # F-key is fine
+        self.win.edit_colour(e.key)
+        self.assertIsNone(self.last_error)
+        self.assertEqual((e.line_key, e.word_key), ("F7", "Ctrl+Shift+F7"))
+
+    def test_own_shortcuts_saved_as_default(self):
+        self.keys_dialog("Alt+J", "Alt+Shift+J")
+        self.win.edit_colour("checked")
+        self.win.save_default_colours()
+        win2 = app_module.MainWindow(None)
+        try:
+            self.assertEqual(app_module.shortcut_text(win2.a_mark_checked), "Alt+J")
+            self.assertEqual(app_module.shortcut_text(win2.a_word_checked), "Alt+Shift+J")
+        finally:
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    # changing colours of the five standard rows -------------------------------------
+    def test_change_builtin_colour_and_back_to_standard(self):
+        self.mark(2, K.Key_G)
+        self.keys_dialog("Alt+G", "Alt+Shift+G", color="#22aa44")
+        self.win.edit_colour("checked")
+        self.assertEqual(set(self.colors_of(2, "src/")), {"#22aa44"})
+        for dark in (True, False):                                    # same in both themes
+            self.win._set_dark(dark)
+            self.assertEqual(set(self.colors_of(2, "src/")), {"#22aa44"})
+            self.assertEqual(self.win.legend.chip("checked").legend_color, "#22aa44")
+        self.keys_dialog("Alt+G", "Alt+Shift+G", color="standard")
+        self.win.edit_colour("checked")
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.c("mark_checked")})
+        self.assertIsNone(self.ed.colours.by_key("checked").color)
+
+    def test_change_default_text_colour(self):
+        self.keys_dialog("Alt+C", "Alt+Shift+C", color="#ddccbb")
+        self.win.edit_colour("text")
+        self.assertEqual(set(self.colors_of(3, "main.py")), {"#ddccbb"})
+        self.assertEqual(set(self.colors_of(2, "src/")), {self.c("folder")})   # folders stay
+        self.assertEqual(self.win.legend.chip("text").legend_color, "#ddccbb")
+        self.mark(3, K.Key_R)
+        self.assertEqual(set(self.colors_of(3, "main.py")), {self.c("mark_problem")})
+
+    def test_change_explanation_colour_still_not_colourable(self):
+        self.keys_dialog("", "", label="Notes", color="#ff9fd0")
+        self.win.edit_colour("explanation")
+        self.assertIsNone(self.last_error)
+        self.assertEqual(set(self.colors_of(2, "Source code")), {"#ff9fd0"})
+        self.assertEqual(self.win.legend.chip("explanation").legend_color, "#ff9fd0")
+        self.select(2, "Source code")
+        self.key(K.Key_G, M.AltModifier | M.ShiftModifier)            # still never coloured
+        self.assertEqual(set(self.colors_of(2, "Source code")), {"#ff9fd0"})
+        self.win.close()
+        win2 = app_module.MainWindow(self.path)                        # stored with the tree
+        old = self.ed
+        try:
+            self.ed = win2.editor
+            self.assertEqual(set(self.colors_of(2, "Source code")), {"#ff9fd0"})
+            self.assertEqual(win2.legend.chip("explanation").text(), "Notes")
+        finally:
+            self.ed = old
+            win2.editor.document().setModified(False)
+            win2.close()
+
+    def test_changed_colours_count_for_validation(self):
+        self.keys_dialog("", "", color="#ff9fd0")
+        self.win.edit_colour("explanation")
+        self.patch_dialog("New", "#ff9fd0")
+        self.win.add_colour()
+        self.assertIn("already used", self.last_error)
+
+    def test_command_preview_keeps_fixed_prefix(self):
+        e = self.add_custom()
+        d = app_module.ColourDialog(self.win, self.ed.colours, self.ed.theme, entry=e,
+                                    taken=self.win.taken_shortcuts())
+        d.meaning.setText("Shared hardware")
+        self.assertIn("Colour line: Shared hardware  (Alt+5)", d.commands.text())
+        self.assertIn("Colour word / selection: Shared hardware  (Alt+Shift+5)", d.commands.text())
+        d.deleteLater()
+
+    # the "Edit legend" window -----------------------------------------------------
+    def test_legend_dialog_lists_edits_and_removes(self):
+        e = self.add_custom()
+        dlg = app_module.LegendDialog(self.win)
+        keys = [dlg.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dlg.list.count())]
+        self.assertEqual(keys, ["text", "checked", "explore", "problem", e.key, "explanation"])
+        self.assertIn("Alt+5", dlg.list.item(4).text())
+        dlg.list.setCurrentRow(1)
+        self.assertFalse(dlg.remove_btn.isEnabled())                  # built-in
+        dlg.list.setCurrentRow(4)
+        self.assertTrue(dlg.remove_btn.isEnabled())
+        self.keys_dialog("Alt+K", "Alt+Shift+K", label="Edited")
+        dlg.edit()
+        self.assertIn("Edited", dlg.list.currentItem().text())
+        dlg.remove()
+        self.assertIsNone(self.ed.colours.by_key(e.key))
+        self.assertEqual(dlg.list.count(), 5)
+        self.patch_dialog("Added here", "#123456")
+        dlg.add()
+        self.assertEqual(dlg.list.count(), 6)
+        self.assertIn("Added here", dlg.list.currentItem().text())
+        dlg.deleteLater()
+        self.assertIn(self.win.a_edit_legend, self.win.tree_menu.actions())
+
+    def test_legend_can_be_hidden_and_shown(self):
+        self.win.a_legend.trigger()
+        self.assertTrue(self.win.legend.isHidden())
+        self.assertFalse(self.win.settings.value("show_legend", True, type=bool))
+        self.win.a_legend.trigger()
+        self.assertFalse(self.win.legend.isHidden())
+
+    # existing behaviour still works ------------------------------------
+    def test_folding_levels(self):
+        self.ed.collapse_all()
+        self.assertEqual(self.ed.current_level(), 0)
+        self.ed.expand_one_level()
+        self.assertEqual(self.ed.current_level(), 1)
+        self.ed.expand_all()
+        self.assertEqual(self.ed.current_level(), self.ed.max_level())
+
+    def test_enter_tab_typing(self):
+        self.ed.set_document_text("root/\n│\n└── ")
+        self.ed.moveCursor(QTextCursor.MoveOperation.End)
+        QTest.keyClicks(self.ed, "src/")
+        self.key(K.Key_Return)
+        QTest.keyClicks(self.ed, "main.py")
+        self.key(K.Key_Tab)
+        self.assertEqual(self.ed.toPlainText(), "root/\n│\n└── src/\n    └── main.py")
+
+
+@unittest.skipIf(QApplication is None, "PySide6 is not installed")
+class StartupTests(unittest.TestCase):
+    """main.py must always load the treemodel.py next to it, and explain
+    clearly (instead of crashing) when that file is missing or wrong."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="nodeon-start-")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _write(self, name, text):
+        with open(os.path.join(self.dir, name), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def assertLoadError(self, fragment):
+        before = sys.modules.get("treemodel")
+        with self.assertRaises(app_module.ModelLoadError) as ctx:
+            app_module.load_treemodel(self.dir)
+        self.assertIn(fragment, str(ctx.exception))
+        self.assertIs(sys.modules.get("treemodel"), before)   # nothing left broken
+
+    def test_correct_file_loads(self):
+        src = os.path.join(PROJECT_ROOT, "main", "treemodel.py")
+        shutil.copy(src, self.dir)
+        before = sys.modules.get("treemodel")
+        try:
+            mod = app_module.load_treemodel(self.dir)
+            self.assertTrue(hasattr(mod, "FormatOptions"))
+            self.assertEqual(os.path.dirname(mod.__file__), self.dir)
+        finally:
+            sys.modules["treemodel"] = before
+
+    def test_missing_file(self):
+        os.mkdir(os.path.join(self.dir, "treemodel"))      # a folder with the same name
+        self.assertLoadError("was not found")
+
+    def test_empty_file(self):
+        self._write("treemodel.py", "")
+        self.assertLoadError("empty")
+
+    def test_wrong_file(self):
+        self._write("treemodel.py", "x = 1\n")
+        self.assertLoadError("Missing: FormatOptions")
+
+    def test_broken_file(self):
+        self._write("treemodel.py", "def broken(:\n")
+        self.assertLoadError("could not be loaded")
+
+    def test_app_uses_file_next_to_main(self):
+        self.assertIsNone(app_module.MODEL_ERROR)
+        self.assertEqual(os.path.normcase(os.path.dirname(app_module.tm.__file__)),
+                         os.path.normcase(os.path.join(PROJECT_ROOT, "main")))
+
+
+if __name__ == "__main__":
+    unittest.main()

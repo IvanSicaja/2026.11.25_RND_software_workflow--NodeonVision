@@ -1,0 +1,36 @@
+<testsuite name="04_explanations.Aligning explanations" tests="3" errors="0" failures="0" skipped="0" time="0.848106" timestamp="2026-11-24T11:01:21.654104" hostname="vm"><testcase classname="04_explanations.Aligning explanations" name="TC-EXPL-001 Moving right brings every explanation into one column" status="passed" time="0.10157"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-EXPL-001 Moving right brings every explanation into one column
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.070s
+    When I press "Alt+Right" 5 times ... passed in 0.032s
+    Then every explanation is in the same column ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="04_explanations.Aligning explanations" name="TC-EXPL-002 Moving left stops 3 spaces after the text" status="passed" time="0.615605"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-EXPL-002 Moving left stops 3 spaces after the text
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.072s
+    When I press "Alt+Left" 40 times ... passed in 0.243s
+    Then every explanation is exactly 3 spaces after its name ... passed in 0.000s
+    And line 7 is "│           ➡️ second line" ... passed in 0.300s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="04_explanations.Aligning explanations" name="TC-FILE-007 Saving keeps the moved explanations" status="passed" time="0.13093"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-FILE-007 Saving keeps the moved explanations
+    Given Nodeon is open with the test file "tree_a.txt" ... passed in 0.071s
+    When I press "Alt+Right" 5 times ... passed in 0.031s
+    And I save the tree ... passed in 0.028s
+    Then the saved file contains the line "└── README.md                          ➡️ Overview" ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase></testsuite>

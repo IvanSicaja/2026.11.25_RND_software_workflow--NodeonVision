@@ -1,0 +1,174 @@
+<testsuite name="03_editing.Structural editing" tests="7" errors="0" failures="0" skipped="0" time="3.365936" timestamp="2026-11-24T11:01:20.765998" hostname="vm"><testcase classname="03_editing.Structural editing" name="TC-EDIT-001 Add an item with the toolbar button" status="passed" time="0.699555"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-EDIT-001 Add an item with the toolbar button
+    Given Nodeon is open with the tree: ... passed in 0.078s
+      """
+      root/
+      ├── a/
+      │   ├── a1
+      │   └── a2
+      ├── b
+      └── c
+      """
+    When I put the cursor at the end of line 3 ... passed in 0.005s
+    And I click the toolbar button "Add item" ... passed in 0.014s
+    And I type "a3" ... passed in 0.302s
+    Then the tree is: ... passed in 0.301s
+      """
+      root/
+      ├── a/
+      │   ├── a1
+      │   ├── a3
+      │   └── a2
+      ├── b
+      └── c
+      """
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="03_editing.Structural editing" name="TC-EDIT-002 Move a branch with its sub-items up" status="passed" time="0.386534"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-EDIT-002 Move a branch with its sub-items up
+    Given Nodeon is open with the tree: ... passed in 0.073s
+      """
+      root/
+      ├── a/
+      │   ├── a1
+      │   └── a2
+      ├── b
+      └── c
+      """
+    When I put the cursor on "b" ... passed in 0.005s
+    And I press "Alt+Shift+Up" ... passed in 0.007s
+    Then the tree is: ... passed in 0.300s
+      """
+      root/
+      ├── b
+      ├── a/
+      │   ├── a1
+      │   └── a2
+      └── c
+      """
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="03_editing.Structural editing" name="TC-EDIT-002 Move an item into the item above and back" status="passed" time="0.69144"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-EDIT-002 Move an item into the item above and back
+    Given Nodeon is open with the tree: ... passed in 0.071s
+      """
+      root/
+      ├── a/
+      │   ├── a1
+      │   └── a2
+      ├── b
+      └── c
+      """
+    When I put the cursor on "c" ... passed in 0.006s
+    And I press "Alt+Shift+Right" ... passed in 0.007s
+    Then line 6 is "    └── c" ... passed in 0.301s
+    When I press "Alt+Shift+Left" ... passed in 0.007s
+    Then line 6 is "└── c" ... passed in 0.300s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="03_editing.Structural editing" name="TC-EDIT-004 Delete line keeps the sub-items and does not quit" status="passed" time="0.388716"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-EDIT-004 Delete line keeps the sub-items and does not quit
+    Given Nodeon is open with the tree: ... passed in 0.076s
+      """
+      root/
+      ├── a/
+      │   ├── a1
+      │   └── a2
+      ├── b
+      └── c
+      """
+    When I put the cursor on "a/" ... passed in 0.006s
+    And I press "Ctrl+Q" ... passed in 0.006s
+    Then the tree is: ... passed in 0.301s
+      """
+      root/
+      ├── a1
+      ├── a2
+      ├── b
+      └── c
+      """
+    And the window is still open ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="03_editing.Structural editing" name="TC-EDIT-005 Insert an empty line that keeps the vertical lines" status="passed" time="0.400312"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-EDIT-005 Insert an empty line that keeps the vertical lines
+    Given Nodeon is open with the tree: ... passed in 0.086s
+      """
+      root/
+      ├── a/
+      │   ├── a1
+      │   └── a2
+      ├── b
+      └── c
+      """
+    When I put the cursor on "a1" ... passed in 0.006s
+    And I press "Alt+Enter" ... passed in 0.007s
+    Then line 4 is "│   │" ... passed in 0.300s
+    And the tree has 7 lines ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="03_editing.Structural editing" name="TC-EDIT-008 Undo restores the tree in one step" status="passed" time="0.108643"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-EDIT-008 Undo restores the tree in one step
+    Given Nodeon is open with the tree: ... passed in 0.091s
+      """
+      root/
+      ├── a/
+      │   ├── a1
+      │   └── a2
+      ├── b
+      └── c
+      """
+    When I put the cursor on "a/" ... passed in 0.005s
+    And I press "Ctrl+Shift+Delete" ... passed in 0.007s
+    Then the tree has 3 lines ... passed in 0.000s
+    When I press "Ctrl+Z" ... passed in 0.006s
+    Then the tree has 6 lines ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="03_editing.Structural editing" name="TC-KEY-001 Typing a list with Enter and Tab" status="passed" time="0.690736"><system-out>
+<![CDATA[
+@scenario.begin
+  Scenario: TC-KEY-001 Typing a list with Enter and Tab
+    Given Nodeon is open with the tree: ... passed in 0.069s
+      """
+      root/
+      ├── a/
+      │   ├── a1
+      │   └── a2
+      ├── b
+      └── c
+      """
+    When I put the cursor at the end of line 6 ... passed in 0.005s
+    And I press "Enter" ... passed in 0.007s
+    And I type "d" ... passed in 0.301s
+    And I press "Tab" ... passed in 0.008s
+    Then line 7 is "    └── d" ... passed in 0.301s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase></testsuite>

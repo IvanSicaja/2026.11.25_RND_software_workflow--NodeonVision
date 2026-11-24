@@ -1,0 +1,28 @@
+SKILLS USED - Nodeon
+====================
+
+Programming
+  - Python 3 (3.10+; tested up to 3.13)
+  - PySide6 / Qt 6: widgets, QPlainTextEdit, QGraphicsView (zoom / pan),
+    QListWidget (drag & drop reorder), splitters, themes (light / dark),
+    keyboard shortcuts, drag & drop of files and pictures, clipboard
+  - Text parsing and rendering of plain-text structure trees
+  - Data storage: JSON database with atomic writes, picture storage,
+    safe file names, backup of damaged files
+
+Software testing
+  - unittest / pytest: unit, integration and GUI tests (headless, Qt offscreen)
+  - Random and stress testing with an oracle (Undo everything -> original state)
+  - System tests through a test driver (grey box)
+  - BDD: Gherkin, Behave, pytest-bdd; C# / .NET Reqnroll + FlaUI (Windows UI Automation)
+  - Playwright: tests of the HTML traceability report
+  - Test documentation: requirements, test specification, traceability matrix,
+    manual test protocol, test report, anomaly log (IEC 62304 / ISO 13485 style)
+
+Tools and infrastructure
+  - Git, GitHub
+  - Docker (reproducible test environment)
+  - CI/CD: TeamCity (Kotlin DSL), Azure DevOps Pipelines (YAML)
+  - SSH / Linux (remote test runs)
+  - PyInstaller (Windows executable)
+  - PyCharm

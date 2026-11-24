@@ -1,0 +1,110 @@
+<testsuite name="08_item_details.Item details - pictures and features of every item" tests="4" errors="0" failures="0" skipped="0" time="4.48354" timestamp="2026-11-24T11:01:28.366674" hostname="vm"><testcase classname="08_item_details.Item details - pictures and features of every item" name="TC-ITEM-001 The panel shows the item at the cursor" status="passed" time="0.405036"><system-out>
+<![CDATA[
+@scenario.begin
+
+  @python_only
+  Scenario: TC-ITEM-001 The panel shows the item at the cursor
+    Given Nodeon is open with the tree: ... passed in 0.097s
+      """
+      garage/
+      │
+      ├── Workbench/
+      │   ├── Cordless drill
+      │   ├── Hammer
+      │   └── Saw
+      └── Bikes/
+          └── City bike
+      """
+    When I put the cursor on "Hammer" ... passed in 0.007s
+    Then the item panel shows "Hammer" ... passed in 0.302s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="08_item_details.Item details - pictures and features of every item" name="TC-ITEM-002 Drop pictures onto an item and browse through them" status="passed" time="0.71381"><system-out>
+<![CDATA[
+@scenario.begin
+
+  @python_only
+  Scenario: TC-ITEM-002 Drop pictures onto an item and browse through them
+    Given Nodeon is open with the tree: ... passed in 0.086s
+      """
+      garage/
+      │
+      ├── Workbench/
+      │   ├── Cordless drill
+      │   ├── Hammer
+      │   └── Saw
+      └── Bikes/
+          └── City bike
+      """
+    When I put the cursor on "Cordless drill" ... passed in 0.006s
+    And I drop 3 pictures onto the item panel ... passed in 0.318s
+    Then the item "Cordless drill" has 3 pictures ... passed in 0.301s
+    And the picture counter shows "1 / 3" ... passed in 0.000s
+    When I show the next picture ... passed in 0.002s
+    And I show the next picture ... passed in 0.000s
+    Then the picture counter shows "3 / 3" ... passed in 0.000s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="08_item_details.Item details - pictures and features of every item" name="TC-ITEM-009 Must-have features and features to avoid" status="passed" time="1.319362"><system-out>
+<![CDATA[
+@scenario.begin
+
+  @python_only
+  Scenario: TC-ITEM-009 Must-have features and features to avoid
+    Given Nodeon is open with the tree: ... passed in 0.083s
+      """
+      garage/
+      │
+      ├── Workbench/
+      │   ├── Cordless drill
+      │   ├── Hammer
+      │   └── Saw
+      └── Bikes/
+          └── City bike
+      """
+    When I put the cursor on "Saw" ... passed in 0.006s
+    And I write the must-have features "sharp teeth" ... passed in 0.313s
+    And I write the features to avoid "plastic handle" ... passed in 0.314s
+    Then the item "Saw" must have "sharp teeth" ... passed in 0.301s
+    And the item "Saw" avoids "plastic handle" ... passed in 0.301s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase><testcase classname="08_item_details.Item details - pictures and features of every item" name="TC-ITEM-012 Pictures stay with their row when it moves and after saving" status="passed" time="2.045331"><system-out>
+<![CDATA[
+@scenario.begin
+
+  @python_only
+  Scenario: TC-ITEM-012 Pictures stay with their row when it moves and after saving
+    Given Nodeon is open with the tree: ... passed in 0.078s
+      """
+      garage/
+      │
+      ├── Workbench/
+      │   ├── Cordless drill
+      │   ├── Hammer
+      │   └── Saw
+      └── Bikes/
+          └── City bike
+      """
+    When I put the cursor on "Saw" ... passed in 0.008s
+    And I drop 2 pictures onto the item panel ... passed in 0.314s
+    And I write the must-have features "folding" ... passed in 0.313s
+    And I press "Alt+Shift+Up" ... passed in 0.008s
+    And I press "Alt+Shift+Up" ... passed in 0.007s
+    And I save the tree ... passed in 0.033s
+    And I reopen the tree ... passed in 0.082s
+    Then line 4 is "│   ├── Saw" ... passed in 0.301s
+    And the item "Saw" has 2 pictures ... passed in 0.300s
+    And the item "Saw" must have "folding" ... passed in 0.301s
+    And the item "Cordless drill" has 0 pictures ... passed in 0.301s
+
+@scenario.end
+--------------------------------------------------------------------------------
+]]>
+</system-out></testcase></testsuite>
